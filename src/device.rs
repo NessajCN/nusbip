@@ -1,3 +1,5 @@
+use std::{os::unix::ffi::OsStrExt, path::PathBuf};
+
 use super::*;
 use rusb::Version as rusbVersion;
 
@@ -40,7 +42,7 @@ impl From<u16> for Version {
 #[derive(Clone, Default, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct UsbDevice {
-    pub path: String,
+    pub path: PathBuf,
     pub bus_id: String,
     pub bus_num: u32,
     pub dev_num: u32,
@@ -73,7 +75,7 @@ pub struct UsbDevice {
 impl UsbDevice {
     pub fn new(index: u32) -> Self {
         let mut res = Self {
-            path: "/sys/bus/0/0/0".to_string(),
+            path: PathBuf::from(String::from("/sys/bus/0/0/0")),
             bus_id: "0-0-0".to_string(),
             dev_num: index,
             speed: UsbSpeed::High as u32,
@@ -234,7 +236,7 @@ impl UsbDevice {
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut result = Vec::with_capacity(312);
 
-        let mut path = self.path.as_bytes().to_vec();
+        let mut path = self.path.clone().as_os_str().as_bytes().to_vec();
         debug_assert!(path.len() <= 256);
         path.resize(256, 0);
         result.extend_from_slice(path.as_slice());
@@ -545,6 +547,10 @@ pub trait UsbDeviceHandler: std::fmt::Debug {
         setup: SetupPacket,
         req: &[u8],
     ) -> Result<Vec<u8>>;
+
+    /// Reattach the kernel driver
+    #[cfg(target_os = "linux")]
+    fn release_claim(&mut self);
 
     /// Helper to downcast to actual struct
     ///

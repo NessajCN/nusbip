@@ -3,20 +3,21 @@
 use log::*;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
+use nusb::{DeviceInfo, Speed};
 use rusb::*;
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Result};
 use std::net::SocketAddr;
+use std::num::NonZeroU8;
+#[cfg(not(target_os = "macos"))]
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use usbip_protocol::UsbIpCommand;
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
 
 pub mod cdc;
 mod consts;
@@ -55,16 +56,48 @@ impl UsbIpServer {
     }
 
     /// Create a [UsbIpServer] with Vec<[nusb::DeviceInfo]> for sharing host devices
-    pub fn with_nusb_devices(nusb_device_infos: Vec<nusb::DeviceInfo>) -> Vec<UsbDevice> {
+    pub async fn with_nusb_devices(nusb_device_infos: Vec<nusb::DeviceInfo>) -> Vec<UsbDevice> {
         let mut devices = vec![];
         for device_info in nusb_device_infos {
-            let dev = match device_info.open() {
+            let dev = match device_info.open().await {
                 Ok(dev) => dev,
                 Err(err) => {
                     warn!("Impossible to open device {device_info:?}: {err}, ignoring device",);
                     continue;
                 }
             };
+            #[cfg(target_os = "linux")]
+            let path = device_info.sysfs_path().to_path_buf();
+            #[cfg(not(target_os = "linux"))]
+            let path = PathBuf::from(format!(
+                "/sys/bus/{}/{}/{}",
+                device_info.busnum(),
+                device_info.device_address(),
+                0
+            ));
+            #[cfg(target_os = "linux")]
+            let bus_id = match path.file_name() {
+                Some(s) => s.to_os_string().into_string().unwrap_or(format!(
+                    "{}-{}-{}",
+                    device_info.busnum(),
+                    device_info.device_address(),
+                    0,
+                )),
+                None => format!(
+                    "{}-{}-{}",
+                    device_info.busnum(),
+                    device_info.device_address(),
+                    0,
+                ),
+            };
+
+            #[cfg(not(target_os = "linux"))]
+            let bus_id = format!(
+                "{}-{}-{}",
+                device_info.busnum(),
+                device_info.device_address(),
+                0,
+            );
             let cfg = match dev.active_configuration() {
                 Ok(cfg) => cfg,
                 Err(err) => {
@@ -78,7 +111,12 @@ impl UsbIpServer {
             for intf in cfg.interfaces() {
                 // ignore alternate settings
                 let intf_num = intf.interface_number();
-                let intf = dev.claim_interface(intf_num).unwrap();
+
+                #[cfg(target_os = "linux")]
+                let intf = dev.detach_and_claim_interface(intf_num).await.unwrap();
+                #[cfg(not(target_os = "linux"))]
+                let intf = dev.claim_interface(intf_num).await.unwrap();
+
                 let alt_setting = intf.descriptors().next().unwrap();
                 let mut endpoints = vec![];
 
@@ -100,27 +138,28 @@ impl UsbIpServer {
                     interface_subclass: alt_setting.subclass(),
                     interface_protocol: alt_setting.protocol(),
                     endpoints,
-                    string_interface: alt_setting.string_index().unwrap_or(0),
+                    string_interface: alt_setting.string_index().unwrap_or(NonZeroU8::MIN).into(),
                     class_specific_descriptor: Vec::new(),
                     handler,
                 });
             }
+            let speed = match device_info.speed() {
+                Some(s) => match s {
+                    Speed::Low => 1u32,
+                    Speed::Full => 2,
+                    Speed::High => 3,
+                    Speed::Super => 5,
+                    Speed::SuperPlus => 6,
+                    _ => s as u32 + 1,
+                },
+                None => 0u32,
+            };
             let mut device = UsbDevice {
-                path: format!(
-                    "/sys/bus/{}/{}/{}",
-                    device_info.bus_number(),
-                    device_info.device_address(),
-                    0
-                ),
-                bus_id: format!(
-                    "{}-{}-{}",
-                    device_info.bus_number(),
-                    device_info.device_address(),
-                    0,
-                ),
-                bus_num: device_info.bus_number() as u32,
+                path,
+                bus_id,
+                bus_num: device_info.busnum() as u32,
                 dev_num: 0,
-                speed: device_info.speed().unwrap() as u32,
+                speed,
                 vendor_id: device_info.vendor_id(),
                 product_id: device_info.product_id(),
                 device_class: device_info.class(),
@@ -160,6 +199,7 @@ impl UsbIpServer {
             }
             devices.push(device);
         }
+        info!("devices available: {devices:?}");
         devices
     }
 
@@ -230,12 +270,12 @@ impl UsbIpServer {
                 });
             }
             let mut device = UsbDevice {
-                path: format!(
+                path: PathBuf::from(format!(
                     "/sys/bus/{}/{}/{}",
                     dev.bus_number(),
                     dev.address(),
                     dev.port_number()
-                ),
+                )),
                 bus_id: format!(
                     "{}-{}-{}",
                     dev.bus_number(),
@@ -323,23 +363,23 @@ impl UsbIpServer {
     }
 
     /// Create a [UsbIpServer] exposing devices in the host, and redirect all USB transfers to them using libusb
-    pub fn new_from_host() -> Self {
-        Self::new_from_host_with_filter(|_| true)
+    pub async fn new_from_host() -> Self {
+        Self::new_from_host_with_filter(|_| true).await
     }
 
     /// Create a [UsbIpServer] exposing filtered devices in the host, and redirect all USB transfers to them using libusb
-    pub fn new_from_host_with_filter<F>(filter: F) -> Self
+    pub async fn new_from_host_with_filter<F>(filter: F) -> Self
     where
-        F: FnMut(&Device<GlobalContext>) -> bool,
+        F: FnMut(&DeviceInfo) -> bool,
     {
-        match rusb::devices() {
+        match nusb::list_devices().await {
             Ok(list) => {
                 let mut devs = vec![];
-                for d in list.iter().filter(filter) {
+                for d in list.filter(filter) {
                     devs.push(d)
                 }
                 Self {
-                    available_devices: RwLock::new(Self::with_rusb_devices(devs)),
+                    available_devices: RwLock::new(Self::with_nusb_devices(devs).await),
                     ..Default::default()
                 }
             }
@@ -375,7 +415,48 @@ impl UsbIpServer {
             ))
         }
     }
+
+    pub async fn cleanup(&self) {
+        let mut used_devices = self.used_devices.write().await;
+        let mut available_devices = self.available_devices.write().await;
+        for k in used_devices.clone().keys() {
+            if let Some(dev) = used_devices.remove(k) {
+                available_devices.push(dev);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut dev_handlers = Vec::new();
+            for d in available_devices.iter() {
+                if let Some(dh) = d.device_handler.clone() {
+                    dev_handlers.push(dh);
+                }
+            }
+            for devhandler in dev_handlers {
+                let mut dh = devhandler.lock().unwrap();
+                dh.release_claim();
+            }
+        }
+    }
 }
+
+// impl Drop for UsbIpServer {
+//     fn drop(&mut self) {
+//         let rt = tokio::runtime::Builder::new_current_thread()
+//             .enable_all()
+//             .build()
+//             .unwrap();
+//         rt.block_on(async move {
+//             let mut used_devices = self.used_devices.write().await;
+//             let mut available_devices = self.available_devices.write().await;
+//             for k in used_devices.keys() {
+//                 if let Some(dev) = used_devices.remove(k) {
+//                     available_devices.push(dev);
+//                 }
+//             }
+//         })
+//     }
+// }
 
 pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
     mut socket: &mut T,
@@ -383,31 +464,35 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
 ) -> Result<()> {
     let mut current_import_device_id: Option<String> = None;
     loop {
-        let command = UsbIpCommand::read_from_socket(&mut socket).await;
-        if let Err(err) = command {
-            if let Some(dev_id) = current_import_device_id {
-                let mut used_devices = server.used_devices.write().await;
-                let mut available_devices = server.available_devices.write().await;
-                match used_devices.remove(&dev_id) {
-                    Some(dev) => available_devices.push(dev),
-                    None => unreachable!(),
+        let command = match UsbIpCommand::read_from_socket(&mut socket).await {
+            Ok(c) => c,
+            Err(err) => {
+                if let Some(dev_id) = current_import_device_id {
+                    let mut used_devices = server.used_devices.write().await;
+                    let mut available_devices = server.available_devices.write().await;
+                    match used_devices.remove(&dev_id) {
+                        Some(dev) => available_devices.push(dev),
+                        None => unreachable!(),
+                    }
+                }
+
+                if err.kind() == ErrorKind::UnexpectedEof {
+                    info!("Remote closed the connection");
+                    return Ok(());
+                } else {
+                    return Err(err);
                 }
             }
+        };
 
-            if err.kind() == ErrorKind::UnexpectedEof {
-                info!("Remote closed the connection");
-                return Ok(());
-            } else {
-                return Err(err);
-            }
-        }
+        // info!("UsbIpCommand received: {command:?}");
 
         let used_devices = server.used_devices.read().await;
         let mut current_import_device = current_import_device_id
             .clone()
             .and_then(|ref id| used_devices.get(id));
 
-        match command.unwrap() {
+        match command {
             UsbIpCommand::OpReqDevlist { .. } => {
                 trace!("Got OP_REQ_DEVLIST");
                 let devices = server.available_devices.read().await;
@@ -463,6 +548,11 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
 
                 header.command = USBIP_RET_SUBMIT.into();
 
+                // Reply header from server should have devid/direction/ep all 0.
+                header.devid = 0;
+                header.direction = 0;
+                header.ep = 0;
+
                 let res = match device.find_ep(real_ep as u8) {
                     None => {
                         warn!("Endpoint {real_ep:02x?} not found");
@@ -508,6 +598,10 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
                 trace!("Got USBIP_CMD_UNLINK for {unlink_seqnum:10x?}");
 
                 header.command = USBIP_RET_UNLINK.into();
+                // Reply header from server should have devid/direction/ep all 0.
+                header.devid = 0;
+                header.direction = 0;
+                header.ep = 0;
 
                 let res = UsbIpResponse::usbip_ret_unlink_success(&header);
                 res.write_to_socket(socket).await?;
@@ -538,7 +632,6 @@ pub async fn server(addr: SocketAddr, server: Arc<UsbIpServer>) {
             }
         }
     };
-
     server.await
 }
 

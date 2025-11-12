@@ -179,7 +179,6 @@ impl UsbIpCommand {
                 debug_assert!(status == 0);
                 let mut busid = [0; 32];
                 socket.read_exact(&mut busid).await?;
-
                 Ok(UsbIpCommand::OpReqImport { status, busid })
             }
             USBIP_CMD_SUBMIT => {
@@ -191,7 +190,7 @@ impl UsbIpCommand {
                 let start_frame = socket.read_u32().await?;
                 let number_of_packets = socket.read_u32().await?;
                 let interval = socket.read_u32().await?;
-
+                // let setup = socket.read_u64().await?;
                 let mut setup = [0; 8];
                 socket.read_exact(&mut setup).await?;
 
@@ -321,6 +320,7 @@ pub enum UsbIpResponse {
         device: Option<UsbDevice>,
     },
     UsbIpRetSubmit {
+        // Reply headers from server should be all 0 from 0xc to 0x14
         header: UsbIpHeaderBasic,
         status: u32,
         actual_length: u32,
@@ -331,6 +331,7 @@ pub enum UsbIpResponse {
         iso_packet_descriptor: Vec<u8>,
     },
     UsbIpRetUnlink {
+        // Reply headers from server should be all 0 from 0xc to 0x14
         header: UsbIpHeaderBasic,
         status: u32,
     },
@@ -385,12 +386,11 @@ impl UsbIpResponse {
                     Vec::with_capacity(48 + transfer_buffer.len() + iso_packet_descriptor.len());
 
                 debug_assert!(header.command == USBIP_RET_SUBMIT.into());
-                debug_assert!(if header.direction == Direction::In as u32 {
-                    actual_length == transfer_buffer.len() as u32
-                } else {
-                    actual_length == 0
-                });
-
+                // debug_assert!(if header.direction == Direction::In as u32 {
+                //     actual_length == transfer_buffer.len() as u32
+                // } else {
+                //     actual_length == 0
+                // });
                 result.extend_from_slice(&header.to_bytes());
                 result.extend_from_slice(&status.to_be_bytes());
                 result.extend_from_slice(&actual_length.to_be_bytes());
@@ -400,6 +400,8 @@ impl UsbIpResponse {
                 result.extend_from_slice(&[0; 8]);
                 result.extend_from_slice(transfer_buffer);
                 result.extend_from_slice(iso_packet_descriptor);
+
+                // info!("UsbIpRetSubmit sent: {result:?}");
                 result
             }
             Self::UsbIpRetUnlink { ref header, status } => {

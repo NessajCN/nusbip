@@ -10,16 +10,13 @@ description = "A library to run USB/IP server"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1.22.0", features = ["rt", "net", "io-util", "sync"] }
+tokio = { version = "1.22.0", features = ["full"] }
 log = "0.4.17"
 num-traits = "0.2.15"
 num-derive = "0.4.2"
-rusb = "0.9.3"
+rusb = "0.9.4"
 serde = { version = "1.0", features = ["derive"], optional = true }
-nusb = "0.1.10"
-
-[dev-dependencies]
-tokio = { version = "1.22.0", features = ["full"] }
+nusb = {version = "0.2", features=["tokio"]}
 env_logger = "0.11.7"
 
 [features]
