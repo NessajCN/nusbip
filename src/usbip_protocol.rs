@@ -6,14 +6,14 @@
 //!
 //! They are based on the [Linux kernel documentation](https://docs.kernel.org/usb/usbip_protocol.html).
 
-use log::trace;
+use log::{info, trace};
 use std::io::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::UsbDevice;
+use crate::{SetupPacket, UsbDevice};
 
 /// USB/IP protocol version
 ///
@@ -38,6 +38,20 @@ pub const USBIP_CMD_UNLINK: u16 = 0x0002;
 pub const USBIP_RET_SUBMIT: u16 = 0x0003;
 /// Reply code: Reply for URB unlink
 pub const USBIP_RET_UNLINK: u16 = 0x0004;
+
+/// USB const
+pub const USB_PORT_FEAT_RESET: u8 = 0x04;
+pub const USB_REQ_SET_FEATURE: u8 = 0x03;
+pub const USB_TYPE_CLASS: u8 = 0x01 << 5;
+pub const USB_RECIP_OTHER: u8 = 0x03;
+pub const USB_RT_PORT: u8 = USB_TYPE_CLASS | USB_RECIP_OTHER;
+pub const USB_REQ_CLEAR_FEATURE: u8 = 0x01;
+pub const USB_RECIP_ENDPOINT: u8 = 0x02;
+pub const USB_ENDPOINT_HALT: u8 = 0;
+pub const USB_REQ_SET_INTERFACE: u8 = 0x0b;
+pub const USB_RECIP_INTERFACE: u8 = 0x01;
+pub const USB_REQ_SET_CONFIGURATION:u8 = 0x09;
+pub const USB_RECIP_DEVICE: u8 = 0;
 
 /// USB/IP direction
 ///
@@ -304,6 +318,37 @@ impl UsbIpCommand {
             }
         }
     }
+}
+
+pub fn is_reset_device_cmd(setup: &[u8; 8]) -> bool {
+    let sp = SetupPacket::parse(setup);
+    // USB_REQ_SET_FEATURE == 0x03, USB_PORT_FEAT_RESET = 0x04
+    if sp.request == USB_REQ_SET_FEATURE
+        && sp.request_type == USB_RT_PORT
+        && sp.value == USB_PORT_FEAT_RESET as u16
+    {
+        info!("reset_device_cmd, port {}", sp.index);
+        true
+    } else {
+        false
+    }
+}
+
+pub fn is_clear_halt_cmd(setup: &[u8; 8]) -> bool {
+    let sp = SetupPacket::parse(setup);
+    sp.request == USB_REQ_CLEAR_FEATURE
+        && sp.request_type == USB_RECIP_ENDPOINT
+        && sp.value == USB_ENDPOINT_HALT as u16
+}
+
+pub fn is_set_interface_cmd(setup: &[u8; 8]) -> bool {
+    let sp = SetupPacket::parse(setup);
+    sp.request == USB_REQ_SET_INTERFACE && sp.request_type == USB_RECIP_INTERFACE
+}
+
+pub fn is_set_configuration_cmd(setup: &[u8; 8]) -> bool {
+    let sp = SetupPacket::parse(setup);
+    sp.request == USB_REQ_SET_CONFIGURATION && sp.request_type == USB_RECIP_DEVICE
 }
 
 /// Server side responses from the USB Host

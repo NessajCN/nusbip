@@ -37,7 +37,10 @@ pub use interface::*;
 pub use setup::*;
 pub use util::*;
 
-use crate::usbip_protocol::{USBIP_RET_SUBMIT, USBIP_RET_UNLINK, UsbIpResponse};
+use crate::usbip_protocol::{
+    USBIP_RET_SUBMIT, USBIP_RET_UNLINK, UsbIpResponse, is_clear_halt_cmd, is_reset_device_cmd,
+    is_set_configuration_cmd, is_set_interface_cmd,
+};
 
 /// Main struct of a USB/IP server
 #[derive(Default, Debug)]
@@ -199,7 +202,7 @@ impl UsbIpServer {
             }
             devices.push(device);
         }
-        info!("devices available: {devices:?}");
+        // info!("devices available: {devices:?}");
         devices
     }
 
@@ -464,7 +467,7 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
 ) -> Result<()> {
     let mut current_import_device_id: Option<String> = None;
     loop {
-        let command = match UsbIpCommand::read_from_socket(&mut socket).await {
+        let mut command = match UsbIpCommand::read_from_socket(&mut socket).await {
             Ok(c) => c,
             Err(err) => {
                 if let Some(dev_id) = current_import_device_id {
@@ -541,7 +544,46 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
                 ..
             } => {
                 trace!("Got USBIP_CMD_SUBMIT");
-                let device = current_import_device.unwrap();
+                let device = match current_import_device {
+                    Some(d) => d,
+                    None => {
+                        error!("No device currently imported");
+                        continue;
+                    }
+                };
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    if is_reset_device_cmd(&setup) {
+                        info!("resetting device");
+                        device
+                            .device_handler
+                            .clone()
+                            .unwrap()
+                            .lock()
+                            .unwrap()
+                            .reset()?;
+                    }
+
+                    if is_clear_halt_cmd(&setup) {
+                        info!("clear halt cmd in");
+                    }
+
+                    if is_set_interface_cmd(&setup) {
+                        info!("set interface cmd in");
+                    }
+
+                    if is_set_configuration_cmd(&setup) {
+                        info!("set configuration cmd in: {setup:?}");
+                        device
+                            .device_handler
+                            .clone()
+                            .unwrap()
+                            .lock()
+                            .unwrap()
+                            .set_configuration(&setup)?;
+                    }
+                }
 
                 let out = header.direction == 0;
                 let real_ep = if out { header.ep } else { header.ep | 0x80 };

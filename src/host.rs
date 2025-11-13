@@ -158,6 +158,16 @@ impl UsbDeviceHandler for RusbUsbHostDeviceHandler {
     #[cfg(target_os = "linux")]
     fn release_claim(&mut self) {}
 
+    #[cfg(not(target_os = "windows"))]
+    fn reset(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn set_configuration(&self, setup: &[u8; 8]) -> Result<()> {
+        Ok(())
+    }
+
     fn as_any(&mut self) -> &mut dyn Any {
         self
     }
@@ -192,7 +202,6 @@ impl UsbInterfaceHandler for NusbUsbHostInterfaceHandler {
         setup: SetupPacket,
         req: &[u8],
     ) -> Result<Vec<u8>> {
-        debug!("To host device: ep={ep:?} setup={setup:?} req={req:?}",);
         let mut buffer = vec![0u8; transfer_buffer_length as usize];
         let timeout = std::time::Duration::new(1, 0);
         let handle = self.handle.lock().unwrap();
@@ -271,7 +280,7 @@ impl UsbInterfaceHandler for NusbUsbHostInterfaceHandler {
                 let mut reader = handle.endpoint::<Interrupt, In>(ep.address)?.reader(4096);
 
                 if let Ok(len) = reader.read(&mut buffer) {
-                    info!("intr in {:?}", &buffer[..len]);
+                    info!("interrupt in {:?}", &buffer[..len]);
                     return Ok(Vec::from(&buffer[..len]));
                 }
             } else {
@@ -283,6 +292,7 @@ impl UsbInterfaceHandler for NusbUsbHostInterfaceHandler {
             // bulk
             // todo!("Missing blocking api for bulk transfer in nusb")
             if let Direction::In = ep.direction() {
+                info!("Bulk in");
                 // bulk in
                 let mut reader = handle.endpoint::<Bulk, In>(ep.address)?.reader(4096);
 
@@ -425,9 +435,7 @@ impl UsbDeviceHandler for NusbUsbHostDeviceHandler {
         let cfg = match dev.active_configuration() {
             Ok(cfg) => cfg,
             Err(err) => {
-                warn!(
-                    "Impossible to get active configuration: {err}, ignoring device",
-                );
+                warn!("Impossible to get active configuration: {err}, ignoring device",);
                 return;
             }
         };
@@ -436,6 +444,61 @@ impl UsbDeviceHandler for NusbUsbHostDeviceHandler {
             let intf_num = intf.interface_number();
             let _ = dev.attach_kernel_driver(intf_num);
         }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn reset(&mut self) -> Result<()> {
+        let mut dev = self.handle.lock().unwrap();
+        let vid = dev.device_descriptor().vendor_id();
+        dev.reset().wait()?;
+        let devices = nusb::list_devices().wait()?;
+        match devices.into_iter().find(|d| d.vendor_id() == vid) {
+            Some(device) => match device.open().wait() {
+                Ok(d) => {
+                    *dev = d;
+                }
+                Err(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "Cannot open device",
+                    ));
+                }
+            },
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Device not found",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn set_configuration(&self, setup: &[u8; 8]) -> Result<()> {
+        let dev = self.handle.lock().unwrap();
+        let sp = SetupPacket::parse(setup);
+
+        // let cfg = dev.active_configuration()?;
+        // info!("Interface cfg: {cfg:?}");
+
+        // for intf in cfg.interfaces() {
+        //     // ignore alternate settings
+        //     let intf_num = intf.interface_number();
+        //     #[cfg(target_os = "linux")]
+        //     let _intf = match dev.detach_and_claim_interface(intf_num).wait() {
+        //         Ok(i) => i,
+        //         Err(e) => {
+        //             error!("Interface claimed: {e:?}");
+        //             return Err(e.into());
+        //         }
+        //     };
+        //     #[cfg(not(target_os = "linux"))]
+        //     let _intf = dev.claim_interface(intf_num).wait()?;
+        // }
+        
+        dev.set_configuration(sp.value as u8).wait()?;
+        Ok(())
     }
 
     fn as_any(&mut self) -> &mut dyn Any {

@@ -474,6 +474,8 @@ impl UsbDevice {
                         // to interface
                         // see https://www.beyondlogic.org/usbnutshell/usb6.shtml
                         // only low 8 bits are valid
+
+                        // info!("Handling urb in interface");
                         let intf = &self.interfaces[setup_packet.index as usize & 0xFF];
                         let mut handler = intf.handler.lock().unwrap();
                         handler.handle_urb(intf, ep, transfer_buffer_length, setup_packet, out_data)
@@ -551,6 +553,16 @@ pub trait UsbDeviceHandler: std::fmt::Debug {
     /// Reattach the kernel driver
     #[cfg(target_os = "linux")]
     fn release_claim(&mut self);
+
+    /// Reset the device, forcing it to re-enumerate.
+    /// This Device will no longer be usable, and you should drop it and call list_devices to find and re-open it again.
+    #[cfg(not(target_os = "windows"))]
+    fn reset(&mut self) -> Result<()>;
+
+    /// Set the device configuration.
+    /// The argument is the desired configuration’s `bConfigurationValue` descriptor field from `ConfigurationDescriptor::configuration_value` or `0` to unconfigure the device.
+    #[cfg(not(target_os = "windows"))]
+    fn set_configuration(&self, setup: &[u8;8]) -> Result<()>;
 
     /// Helper to downcast to actual struct
     ///
