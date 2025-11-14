@@ -50,7 +50,7 @@ pub const USB_RECIP_ENDPOINT: u8 = 0x02;
 pub const USB_ENDPOINT_HALT: u8 = 0;
 pub const USB_REQ_SET_INTERFACE: u8 = 0x0b;
 pub const USB_RECIP_INTERFACE: u8 = 0x01;
-pub const USB_REQ_SET_CONFIGURATION:u8 = 0x09;
+pub const USB_REQ_SET_CONFIGURATION: u8 = 0x09;
 pub const USB_RECIP_DEVICE: u8 = 0;
 
 /// USB/IP direction
@@ -227,8 +227,7 @@ impl UsbIpCommand {
                     } else {
                         vec![]
                     };
-
-                Ok(UsbIpCommand::UsbIpCmdSubmit {
+                let c = UsbIpCommand::UsbIpCmdSubmit {
                     header,
                     transfer_flags,
                     transfer_buffer_length,
@@ -238,7 +237,9 @@ impl UsbIpCommand {
                     setup,
                     data,
                     iso_packet_descriptor,
-                })
+                };
+                info!("Received: {c:02x?}");
+                Ok(c)
             }
             USBIP_CMD_UNLINK => {
                 let header =
@@ -346,13 +347,13 @@ pub fn is_set_interface_cmd(setup: &[u8; 8]) -> bool {
     sp.request == USB_REQ_SET_INTERFACE && sp.request_type == USB_RECIP_INTERFACE
 }
 
-pub fn is_set_configuration_cmd(setup: &[u8; 8]) -> bool {
-    let sp = SetupPacket::parse(setup);
+pub fn is_set_configuration_cmd(sp: &SetupPacket) -> bool {
+    // let sp = SetupPacket::parse(setup);
     sp.request == USB_REQ_SET_CONFIGURATION && sp.request_type == USB_RECIP_DEVICE
 }
 
 /// Server side responses from the USB Host
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub enum UsbIpResponse {
     OpRepDevlist {
@@ -495,34 +496,38 @@ impl UsbIpResponse {
     pub fn usbip_ret_submit_success(
         header: &UsbIpHeaderBasic,
         start_frame: u32,
-        number_of_packets: u32,
+        actual_length: u32,
         transfer_buffer: Vec<u8>,
         iso_packet_descriptor: Vec<u8>,
     ) -> Self {
-        Self::UsbIpRetSubmit {
+        let s = Self::UsbIpRetSubmit {
             header: header.clone(),
             status: 0,
-            actual_length: transfer_buffer.len() as u32,
+            actual_length,
             start_frame,
-            number_of_packets,
+            number_of_packets: 0,
             error_count: 0,
             transfer_buffer,
             iso_packet_descriptor,
-        }
+        };
+        info!("Sent success: {s:02x?}");
+        s
     }
 
     /// Constructs a failed OP_REP_IMPORT response
-    pub fn usbip_ret_submit_fail(header: &UsbIpHeaderBasic) -> Self {
-        Self::UsbIpRetSubmit {
+    pub fn usbip_ret_submit_fail(header: &UsbIpHeaderBasic, actual_length: u32) -> Self {
+        let s = Self::UsbIpRetSubmit {
             header: header.clone(),
             status: 1,
-            actual_length: 0,
+            actual_length,
             start_frame: 0,
             number_of_packets: 0,
             error_count: 0,
             transfer_buffer: vec![],
             iso_packet_descriptor: vec![],
-        }
+        };
+        info!("Sent failed: {s:02x?}");
+        s
     }
 
     /// Constructs a successful OP_REP_IMPORT response

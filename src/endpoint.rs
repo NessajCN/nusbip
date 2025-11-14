@@ -1,5 +1,3 @@
-use super::*;
-
 /// Represent a USB endpoint
 #[derive(Clone, Copy, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -16,11 +14,11 @@ pub struct UsbEndpoint {
 
 impl UsbEndpoint {
     /// Get direction from MSB of address
-    pub fn direction(&self) -> Direction {
-        if self.address & 0x80 != 0 {
-            Direction::In
+    pub fn direction(&self) -> nusb::transfer::Direction {
+        if self.address & 0x80 == 0x80 {
+            nusb::transfer::Direction::In
         } else {
-            Direction::Out
+            nusb::transfer::Direction::Out
         }
     }
 

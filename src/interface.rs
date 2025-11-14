@@ -1,3 +1,5 @@
+use nusb::Interface;
+
 use super::*;
 
 /// Represent a USB interface
@@ -12,7 +14,7 @@ pub struct UsbInterface {
     pub class_specific_descriptor: Vec<u8>,
 
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub handler: Arc<Mutex<Box<dyn UsbInterfaceHandler + Send>>>,
+    pub handler: Interface,
 }
 
 /// A handler of a custom usb interface

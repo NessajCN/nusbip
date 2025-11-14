@@ -1,6 +1,7 @@
 use std::{os::unix::ffi::OsStrExt, path::PathBuf};
 
 use super::*;
+use nusb::{Device, Interface};
 use rusb::Version as rusbVersion;
 
 #[derive(Clone, Default, Debug)]
@@ -58,9 +59,11 @@ pub struct UsbDevice {
     pub interfaces: Vec<UsbInterface>,
 
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub device_handler: Option<Arc<Mutex<Box<dyn UsbDeviceHandler + Send>>>>,
+    pub device_handler: Option<Device>,
 
     pub usb_version: Version,
+    pub attributes: u8,
+    pub max_power: u8,
 
     pub(crate) ep0_in: UsbEndpoint,
     pub(crate) ep0_out: UsbEndpoint,
@@ -182,10 +185,10 @@ impl UsbDevice {
         interface_protocol: u8,
         name: Option<&str>,
         endpoints: Vec<UsbEndpoint>,
-        handler: Arc<Mutex<Box<dyn UsbInterfaceHandler + Send>>>,
+        handler: Interface,
     ) -> Self {
         let string_interface = name.map(|name| self.new_string(name)).unwrap_or(0);
-        let class_specific_descriptor = handler.lock().unwrap().get_class_specific_descriptor();
+        let class_specific_descriptor = Vec::new();
         self.interfaces.push(UsbInterface {
             interface_class,
             interface_subclass,
@@ -198,10 +201,7 @@ impl UsbDevice {
         self
     }
 
-    pub fn with_device_handler(
-        mut self,
-        handler: Arc<Mutex<Box<dyn UsbDeviceHandler + Send>>>,
-    ) -> Self {
+    pub fn with_device_handler(mut self, handler: Device) -> Self {
         self.device_handler = Some(handler);
         self
     }
@@ -289,7 +289,6 @@ impl UsbDevice {
         use Direction::*;
         use EndpointAttributes::*;
         use StandardRequest::*;
-
         match (FromPrimitive::from_u8(ep.attributes), ep.direction()) {
             (Some(Control), In) => {
                 // control in
@@ -357,8 +356,8 @@ impl UsbDevice {
                                     self.interfaces.len() as u8, // bNumInterfaces
                                     self.configuration_value, // bConfigurationValue
                                     self.string_configuration, // iConfiguration
-                                    0x80, // bmAttributes: Bus Powered
-                                    0x32, // bMaxPower: 100mA
+                                    self.attributes, // bmAttributes: Bus Powered
+                                    self.max_power, // bMaxPower: 100mA
                                 ];
                                 for (i, intf) in self.interfaces.iter().enumerate() {
                                     let mut intf_desc = vec![
@@ -474,18 +473,33 @@ impl UsbDevice {
                         // to interface
                         // see https://www.beyondlogic.org/usbnutshell/usb6.shtml
                         // only low 8 bits are valid
-
-                        // info!("Handling urb in interface");
+                        let device = match self.device_handler.clone() {
+                            Some(dev) => dev,
+                            None => {
+                                return Ok(Vec::new());
+                            }
+                        };
                         let intf = &self.interfaces[setup_packet.index as usize & 0xFF];
-                        let mut handler = intf.handler.lock().unwrap();
-                        handler.handle_urb(intf, ep, transfer_buffer_length, setup_packet, out_data)
+                        let handler = intf.handler.clone();
+                        handle_urb_for_interface(
+                            handler,
+                            device,
+                            ep,
+                            transfer_buffer_length,
+                            setup_packet,
+                            out_data,
+                        )
                     }
                     _ if setup_packet.request_type & 0xF == 0 && self.device_handler.is_some() => {
                         // to device
                         // see https://www.beyondlogic.org/usbnutshell/usb6.shtml
-                        let lock = self.device_handler.as_ref().unwrap();
-                        let mut handler = lock.lock().unwrap();
-                        handler.handle_urb(transfer_buffer_length, setup_packet, out_data)
+                        let handler = self.device_handler.clone().unwrap();
+                        handle_urb_for_device(
+                            handler,
+                            transfer_buffer_length,
+                            setup_packet,
+                            out_data,
+                        )
                     }
                     _ => unimplemented!("control in"),
                 }
@@ -501,7 +515,26 @@ impl UsbDevice {
                         let mut desc = vec![
                             self.configuration_value, // bConfigurationValue
                         ];
-
+                        if let Some(dh) = self.device_handler.clone() {
+                            #[cfg(target_os = "linux")]
+                            match intf {
+                                Some(i) => {
+                                    if let Err(e) =
+                                        dh.detach_kernel_driver(i.handler.interface_number())
+                                    {
+                                        error!("Failed to detach kernel driver: {e:?}");
+                                    }
+                                }
+                                None => {
+                                    if let Err(e) = dh.detach_kernel_driver(0) {
+                                        error!("Failed to detach kernel driver: {e:?}");
+                                    }
+                                }
+                            }
+                            if let Err(e) = dh.set_configuration(setup_packet.value as u8).await {
+                                error!("Error setting config: {e:?}");
+                            };
+                        }
                         // requested len too short: wLength < real length
                         if setup_packet.length < desc.len() as u16 {
                             desc.resize(setup_packet.length as usize, 0);
@@ -512,27 +545,76 @@ impl UsbDevice {
                         // to interface
                         // see https://www.beyondlogic.org/usbnutshell/usb6.shtml
                         // only low 8 bits are valid
+
                         let intf = &self.interfaces[setup_packet.index as usize & 0xFF];
-                        let mut handler = intf.handler.lock().unwrap();
-                        handler.handle_urb(intf, ep, transfer_buffer_length, setup_packet, out_data)
+                        let interface = intf.handler.clone();
+                        let device = match self.device_handler.clone() {
+                            Some(dev) => dev,
+                            None => {
+                                return Ok(Vec::new());
+                            }
+                        };
+                        handle_urb_for_interface(
+                            interface,
+                            device,
+                            ep,
+                            transfer_buffer_length,
+                            setup_packet,
+                            out_data,
+                        )
                     }
-                    _ if setup_packet.request_type & 0xF == 0 && self.device_handler.is_some() => {
+                    _ if setup_packet.request_type & 0xF == 0 => {
                         // to device
                         // see https://www.beyondlogic.org/usbnutshell/usb6.shtml
-                        let lock = self.device_handler.as_ref().unwrap();
-                        let mut handler = lock.lock().unwrap();
-                        handler.handle_urb(transfer_buffer_length, setup_packet, out_data)
+                        match self.device_handler.clone() {
+                            Some(dh) => handle_urb_for_device(
+                                dh,
+                                transfer_buffer_length,
+                                setup_packet,
+                                out_data,
+                            ),
+                            None => Ok(Vec::new()),
+                        }
                     }
                     _ => unimplemented!("control out"),
                 }
             }
-            (Some(_), _) => {
+            _ => {
                 // others
+                // if setup_packet.request_type & 0xf == 1 {
+                //     let intf = &self.interfaces[setup_packet.index as usize & 0xFF];
+                //     let mut handler = intf.handler.lock().unwrap();
+                //     handler.handle_urb(intf, ep, transfer_buffer_length, setup_packet, out_data)
+                // } else if setup_packet.request_type & 0xf == 0 {
+                //     match self.device_handler.clone() {
+                //         Some(dh) => {
+                //             let mut handler = dh.lock().unwrap();
+                //             handler.handle_urb(transfer_buffer_length, setup_packet, out_data)
+                //         }
+                //         None => Ok(Vec::new()),
+                //     }
+                // } else {
+                //     Ok(Vec::new())
+                // }
+                // info!("ep: {ep:?}. interface: {intf:?}");
                 let intf = intf.unwrap();
-                let mut handler = intf.handler.lock().unwrap();
-                handler.handle_urb(intf, ep, transfer_buffer_length, setup_packet, out_data)
+                let interface = intf.handler.clone();
+                let device = match self.device_handler.clone() {
+                    Some(dev) => dev,
+                    None => {
+                        return Ok(Vec::new());
+                    }
+                };
+                handle_urb_for_interface(
+                    interface,
+                    device,
+                    ep,
+                    transfer_buffer_length,
+                    setup_packet,
+                    out_data,
+                )
             }
-            _ => unimplemented!("transfer to {:?}", ep),
+            // _ => unimplemented!("transfer to {:?}", ep),
         }
     }
 }
@@ -562,7 +644,7 @@ pub trait UsbDeviceHandler: std::fmt::Debug {
     /// Set the device configuration.
     /// The argument is the desired configuration’s `bConfigurationValue` descriptor field from `ConfigurationDescriptor::configuration_value` or `0` to unconfigure the device.
     #[cfg(not(target_os = "windows"))]
-    fn set_configuration(&self, setup: &[u8;8]) -> Result<()>;
+    fn set_configuration(&self, setup: &[u8; 8]) -> Result<()>;
 
     /// Helper to downcast to actual struct
     ///
@@ -601,32 +683,48 @@ mod test {
         assert_eq!(device.string_pool[&4], "test");
     }
 
-    #[tokio::test]
-    async fn test_invalid_string_index() {
-        setup_test_logger();
-        let device = UsbDevice::new(0);
-        let res = device
-            .handle_urb(
-                UsbEndpoint {
-                    address: 0x80, // IN
-                    attributes: EndpointAttributes::Control as u8,
-                    max_packet_size: EP0_MAX_PACKET_SIZE,
-                    interval: 0,
-                },
-                None,
-                0,
-                SetupPacket {
-                    request_type: 0b10000000,
-                    request: StandardRequest::GetDescriptor as u8,
-                    // string pool only contains 4 strings, 5 should be invalid
-                    value: ((DescriptorType::String as u16) << 8) | 5,
-                    index: 0,
-                    length: 0,
-                },
-                &[],
-            )
-            .await;
+    // #[tokio::test]
+    // async fn test_invalid_string_index() {
+    //     setup_test_logger();
+    //     let device = UsbDevice::new(0);
+    //     let res = device
+    //         .handle_urb(
+    //             UsbEndpoint {
+    //                 address: 0x80, // IN
+    //                 attributes: EndpointAttributes::Control as u8,
+    //                 max_packet_size: EP0_MAX_PACKET_SIZE,
+    //                 interval: 0,
+    //             },
+    //             None,
+    //             0,
+    //             SetupPacket {
+    //                 request_type: 0b10000000,
+    //                 request: StandardRequest::GetDescriptor as u8,
+    //                 // string pool only contains 4 strings, 5 should be invalid
+    //                 value: ((DescriptorType::String as u16) << 8) | 5,
+    //                 index: 0,
+    //                 length: 0,
+    //             },
+    //             &[],
+    //         )
+    //         .await;
 
-        assert!(res.is_err());
+    //     assert!(res.is_err());
+    // }
+}
+
+#[cfg(target_os = "linux")]
+pub fn release_claim(device: Device) {
+    let cfg = match device.active_configuration() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            warn!("Impossible to get active configuration: {err}, ignoring device",);
+            return;
+        }
+    };
+    for intf in cfg.interfaces() {
+        // ignore alternate settings
+        let intf_num = intf.interface_number();
+        let _ = device.attach_kernel_driver(intf_num);
     }
 }

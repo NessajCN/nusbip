@@ -52,6 +52,17 @@ pub enum EndpointAttributes {
     Interrupt,
 }
 
+pub struct TransferFlags;
+impl TransferFlags {
+    pub const SHORT_NOT_OK: u32 = 0x00000001;
+    pub const ISO_ASAP: u32 = 0x00000002;
+    pub const NO_TRANSFER_DMA_MAP: u32 = 0x00000004;
+    pub const ZERO_PACKET: u32 = 0x00000040;
+    pub const NO_INTERRUPT: u32 = 0x00000080;
+    pub const FREE_BUFFER: u32 = 0x00000100;
+    pub const DIR_MASK: u32 = 0x00000200;
+}
+
 /// USB endpoint direction: IN or OUT
 /// Already exists in rusb crate
 pub use rusb::Direction;

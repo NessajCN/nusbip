@@ -29,3 +29,7 @@ impl SetupPacket {
         }
     }
 }
+
+pub fn is_setup(setup: &[u8; 8]) -> bool {
+    setup.iter().any(|b| *b != 0)
+}

@@ -1,14 +1,14 @@
 //! Host USB
 use log::*;
 use nusb::{
-    MaybeFuture,
-    transfer::{Bulk, In, Interrupt, Out},
+    Device, Interface, MaybeFuture,
+    transfer::{Bulk, Direction, In, Interrupt, Out},
 };
-use rusb::*;
-use std::any::Any;
+use rusb::{DeviceHandle, GlobalContext};
 use std::io::Result;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use std::{any::Any, time::Duration};
 
 use crate::{
     EndpointAttributes, SetupPacket, UsbDeviceHandler, UsbEndpoint, UsbInterface,
@@ -176,7 +176,7 @@ impl UsbDeviceHandler for RusbUsbHostDeviceHandler {
 /// A handler to pass requests to interface of a nusb USB device of the host
 #[derive(Clone)]
 pub struct NusbUsbHostInterfaceHandler {
-    handle: Arc<Mutex<nusb::Interface>>,
+    handle: nusb::Interface,
 }
 
 impl std::fmt::Debug for NusbUsbHostInterfaceHandler {
@@ -188,7 +188,7 @@ impl std::fmt::Debug for NusbUsbHostInterfaceHandler {
 }
 
 impl NusbUsbHostInterfaceHandler {
-    pub fn new(handle: Arc<Mutex<nusb::Interface>>) -> Self {
+    pub fn new(handle: nusb::Interface) -> Self {
         Self { handle }
     }
 }
@@ -204,7 +204,7 @@ impl UsbInterfaceHandler for NusbUsbHostInterfaceHandler {
     ) -> Result<Vec<u8>> {
         let mut buffer = vec![0u8; transfer_buffer_length as usize];
         let timeout = std::time::Duration::new(1, 0);
-        let handle = self.handle.lock().unwrap();
+        let handle = self.handle.clone();
         // let control = nusb::transfer::ControlIn {
         //     control_type: match (setup.request_type >> 5) & 0b11 {
         //         0 => nusb::transfer::ControlType::Standard,
@@ -277,7 +277,10 @@ impl UsbInterfaceHandler for NusbUsbHostInterfaceHandler {
             // todo!("Missing blocking api for interrupt transfer in nusb")
             if let Direction::In = ep.direction() {
                 // interrupt in
-                let mut reader = handle.endpoint::<Interrupt, In>(ep.address)?.reader(4096);
+                let mut reader = handle
+                    .endpoint::<Interrupt, In>(ep.address)?
+                    .reader(4096)
+                    .with_read_timeout(Duration::from_secs(1));
 
                 if let Ok(len) = reader.read(&mut buffer) {
                     info!("interrupt in {:?}", &buffer[..len]);
@@ -285,28 +288,44 @@ impl UsbInterfaceHandler for NusbUsbHostInterfaceHandler {
                 }
             } else {
                 // interrupt out
-                let mut writer = handle.endpoint::<Interrupt, Out>(ep.address)?.writer(4096);
+                let mut writer = handle
+                    .endpoint::<Interrupt, Out>(ep.address)?
+                    .writer(4096)
+                    .with_write_timeout(Duration::from_secs(1));
                 writer.write_all(&req)?;
+                writer.flush()?;
             }
         } else if ep.attributes == EndpointAttributes::Bulk as u8 {
             // bulk
             // todo!("Missing blocking api for bulk transfer in nusb")
             if let Direction::In = ep.direction() {
-                info!("Bulk in");
                 // bulk in
-                let mut reader = handle.endpoint::<Bulk, In>(ep.address)?.reader(4096);
+                let mut reader = handle
+                    .endpoint::<Bulk, In>(ep.address)?
+                    .reader(4096)
+                    .with_read_timeout(Duration::from_secs(1));
 
-                if let Ok(len) = reader.read(&mut buffer) {
-                    info!("intr in {:?}", &buffer[..len]);
-                    return Ok(Vec::from(&buffer[..len]));
+                match reader.read_exact(&mut buffer) {
+                    Ok(()) => {
+                        info!("intr in {:02x?}", &buffer);
+                        return Ok(buffer);
+                    }
+                    Err(e) => {
+                        error!("Error when read buffer: {e:?}");
+                        return Err(e);
+                    }
                 }
                 // if let Ok(len) = handle.read_bulk(ep.address, &mut buffer, timeout) {
                 //     return Ok(Vec::from(&buffer[..len]));
                 // }
             } else {
                 // bulk out
-                let mut writer = handle.endpoint::<Bulk, Out>(ep.address)?.writer(4096);
+                let mut writer = handle
+                    .endpoint::<Bulk, Out>(ep.address)?
+                    .writer(4096)
+                    .with_write_timeout(Duration::from_secs(1));
                 writer.write_all(&req)?;
+                writer.flush()?;
                 // handle.write_bulk(ep.address, req, timeout).ok();
             }
         }
@@ -320,6 +339,144 @@ impl UsbInterfaceHandler for NusbUsbHostInterfaceHandler {
     fn as_any(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+pub fn handle_urb_for_interface(
+    interface: Interface,
+    device: Device,
+    ep: UsbEndpoint,
+    transfer_buffer_length: u32,
+    setup: SetupPacket,
+    req: &[u8],
+) -> Result<Vec<u8>> {
+    let mut buffer = vec![0u8; transfer_buffer_length as usize];
+    let timeout = std::time::Duration::new(1, 0);
+    info!("Handing interface with endpoint: {ep:?}, transfer length: {transfer_buffer_length}");
+    if ep.attributes == EndpointAttributes::Control as u8 {
+        // control
+        if let Direction::In = ep.direction() {
+            // control in
+            let control = nusb::transfer::ControlIn {
+                control_type: match (setup.request_type >> 5) & 0b11 {
+                    0 => nusb::transfer::ControlType::Standard,
+                    1 => nusb::transfer::ControlType::Class,
+                    2 => nusb::transfer::ControlType::Vendor,
+                    _ => unimplemented!(),
+                },
+                recipient: match setup.request_type & 0b11111 {
+                    0 => nusb::transfer::Recipient::Device,
+                    1 => nusb::transfer::Recipient::Interface,
+                    2 => nusb::transfer::Recipient::Endpoint,
+                    3 => nusb::transfer::Recipient::Other,
+                    _ => unimplemented!(),
+                },
+                request: setup.request,
+                value: setup.value,
+                index: setup.index,
+                length: setup.length,
+            };
+            if let Ok(buf) = interface.control_in(control, timeout).wait() {
+                return Ok(buf);
+            }
+        } else {
+            // control out
+            let control = nusb::transfer::ControlOut {
+                control_type: match (setup.request_type >> 5) & 0b11 {
+                    0 => nusb::transfer::ControlType::Standard,
+                    1 => nusb::transfer::ControlType::Class,
+                    2 => nusb::transfer::ControlType::Vendor,
+                    _ => unimplemented!(),
+                },
+                recipient: match setup.request_type & 0b11111 {
+                    0 => nusb::transfer::Recipient::Device,
+                    1 => nusb::transfer::Recipient::Interface,
+                    2 => nusb::transfer::Recipient::Endpoint,
+                    3 => nusb::transfer::Recipient::Other,
+                    _ => unimplemented!(),
+                },
+                request: setup.request,
+                value: setup.value,
+                index: setup.index,
+                data: req,
+            };
+            interface.control_out(control, timeout).wait()?;
+        }
+    } else if ep.attributes == EndpointAttributes::Interrupt as u8 {
+        // interrupt
+        // todo!("Missing blocking api for interrupt transfer in nusb")
+        if let Direction::In = ep.direction() {
+            // interrupt in
+            let mut reader = interface
+                .endpoint::<Interrupt, In>(ep.address)?
+                .reader(4096)
+                .with_num_transfers(2)
+                .with_read_timeout(Duration::from_secs(1));
+
+            if let Ok(len) = reader.read(&mut buffer) {
+                info!("interrupt in {:?}", &buffer[..len]);
+                return Ok(Vec::from(&buffer[..len]));
+            }
+        } else {
+            // interrupt out
+            let mut writer = interface
+                .endpoint::<Interrupt, Out>(ep.address)?
+                .writer(4096)
+                .with_num_transfers(2)
+                .with_write_timeout(Duration::from_secs(1));
+            writer.write_all(&req)?;
+            writer.flush()?;
+        }
+    } else if ep.attributes == EndpointAttributes::Bulk as u8 {
+        // bulk
+        // todo!("Missing blocking api for bulk transfer in nusb")
+        if let Direction::In = ep.direction() {
+            // bulk in
+            // #[cfg(target_os = "linux")]
+            // match device.detach_kernel_driver(interface.interface_number()) {
+            //     Ok(()) => info!("Kernal driver detached at {}", interface.interface_number()),
+            //     Err(e) => error!(
+            //         "Failed to detach kernel driver: {e:?}, interface num : {}",
+            //         interface.interface_number()
+            //     ),
+            // }
+            // let interface = device
+            //     .claim_interface(interface.interface_number())
+            //     .wait()
+            //     .unwrap();
+            let ep_in = interface.endpoint::<Bulk, In>(ep.address)?;
+            // ep_in.clear_halt().wait()?;
+            let mut reader = ep_in
+                .reader(4096)
+                .with_num_transfers(2)
+                .with_read_timeout(Duration::from_secs(1));
+
+            match reader.read_exact(&mut buffer) {
+                Ok(()) => {
+                    info!("intr in {:02x?}", &buffer);
+                    return Ok(buffer);
+                }
+                Err(e) => {
+                    error!("Error when read buffer: {e:?}, buffer: {buffer:02x?}.");
+                    return Err(e);
+                }
+            }
+            // if let Ok(len) = handle.read_bulk(ep.address, &mut buffer, timeout) {
+            //     return Ok(Vec::from(&buffer[..len]));
+            // }
+        } else {
+            // bulk out
+            // info!("Bulk out received");
+            let mut writer = interface
+                .endpoint::<Bulk, Out>(ep.address)?
+                .writer(4096)
+                .with_num_transfers(2)
+                .with_write_timeout(Duration::from_secs(1));
+            writer.write_all(&req)?;
+            writer.flush()?;
+            // handle.write_bulk(ep.address, req, timeout).ok();
+        }
+    }
+    Ok(vec![])
 }
 
 /// A handler to pass requests to device of a nusb USB device of the host
@@ -345,32 +502,14 @@ impl NusbUsbHostDeviceHandler {
 impl UsbDeviceHandler for NusbUsbHostDeviceHandler {
     fn handle_urb(
         &mut self,
-        transfer_buffer_length: u32,
+        _transfer_buffer_length: u32,
         setup: SetupPacket,
         req: &[u8],
     ) -> Result<Vec<u8>> {
-        debug!("To host device: setup={setup:?} req={req:?}");
+        // info!("To host device: setup={setup:?} req={req:?}");
         // let mut buffer = vec![0u8; transfer_buffer_length as usize];
         let timeout = std::time::Duration::new(1, 0);
         let handle = self.handle.lock().unwrap();
-        // let control = nusb::transfer::Control {
-        //     control_type: match (setup.request_type >> 5) & 0b11 {
-        //         0 => nusb::transfer::ControlType::Standard,
-        //         1 => nusb::transfer::ControlType::Class,
-        //         2 => nusb::transfer::ControlType::Vendor,
-        //         _ => unimplemented!(),
-        //     },
-        //     recipient: match setup.request_type & 0b11111 {
-        //         0 => nusb::transfer::Recipient::Device,
-        //         1 => nusb::transfer::Recipient::Interface,
-        //         2 => nusb::transfer::Recipient::Endpoint,
-        //         3 => nusb::transfer::Recipient::Other,
-        //         _ => unimplemented!(),
-        //     },
-        //     request: setup.request,
-        //     value: setup.value,
-        //     index: setup.index,
-        // };
         // control
         if cfg!(not(target_os = "windows")) {
             if setup.request_type & 0x80 == 0 {
@@ -479,7 +618,7 @@ impl UsbDeviceHandler for NusbUsbHostDeviceHandler {
         let dev = self.handle.lock().unwrap();
         let sp = SetupPacket::parse(setup);
 
-        // let cfg = dev.active_configuration()?;
+        let cfg = dev.active_configuration()?;
         // info!("Interface cfg: {cfg:?}");
 
         // for intf in cfg.interfaces() {
@@ -496,7 +635,7 @@ impl UsbDeviceHandler for NusbUsbHostDeviceHandler {
         //     #[cfg(not(target_os = "linux"))]
         //     let _intf = dev.claim_interface(intf_num).wait()?;
         // }
-        
+
         dev.set_configuration(sp.value as u8).wait()?;
         Ok(())
     }
@@ -504,4 +643,72 @@ impl UsbDeviceHandler for NusbUsbHostDeviceHandler {
     fn as_any(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+pub fn handle_urb_for_device(
+    device: Device,
+    _transfer_buffer_length: u32,
+    setup: SetupPacket,
+    req: &[u8],
+) -> Result<Vec<u8>> {
+    // info!("To host device: setup={setup:?} req={req:?}");
+    // let mut buffer = vec![0u8; transfer_buffer_length as usize];
+    let timeout = std::time::Duration::new(1, 0);
+
+    // control
+    if cfg!(not(target_os = "windows")) {
+        if setup.request_type & 0x80 == 0 {
+            // control out
+            #[cfg(not(target_os = "windows"))]
+            let control = nusb::transfer::ControlOut {
+                control_type: match (setup.request_type >> 5) & 0b11 {
+                    0 => nusb::transfer::ControlType::Standard,
+                    1 => nusb::transfer::ControlType::Class,
+                    2 => nusb::transfer::ControlType::Vendor,
+                    _ => unimplemented!(),
+                },
+                recipient: match setup.request_type & 0b11111 {
+                    0 => nusb::transfer::Recipient::Device,
+                    1 => nusb::transfer::Recipient::Interface,
+                    2 => nusb::transfer::Recipient::Endpoint,
+                    3 => nusb::transfer::Recipient::Other,
+                    _ => unimplemented!(),
+                },
+                request: setup.request,
+                value: setup.value,
+                index: setup.index,
+                data: req,
+            };
+            device.control_out(control, timeout).wait()?;
+        } else {
+            // control in
+            #[cfg(not(target_os = "windows"))]
+            let control = nusb::transfer::ControlIn {
+                control_type: match (setup.request_type >> 5) & 0b11 {
+                    0 => nusb::transfer::ControlType::Standard,
+                    1 => nusb::transfer::ControlType::Class,
+                    2 => nusb::transfer::ControlType::Vendor,
+                    _ => unimplemented!(),
+                },
+                recipient: match setup.request_type & 0b11111 {
+                    0 => nusb::transfer::Recipient::Device,
+                    1 => nusb::transfer::Recipient::Interface,
+                    2 => nusb::transfer::Recipient::Endpoint,
+                    3 => nusb::transfer::Recipient::Other,
+                    _ => unimplemented!(),
+                },
+                request: setup.request,
+                value: setup.value,
+                index: setup.index,
+                length: setup.length,
+            };
+
+            if let Ok(buf) = device.control_in(control, timeout).wait() {
+                return Ok(buf);
+            }
+        }
+    } else {
+        warn!("Not supported in windows")
+    }
+    Ok(vec![])
 }
