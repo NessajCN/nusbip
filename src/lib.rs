@@ -605,21 +605,13 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
                         UsbIpResponse::usbip_ret_submit_fail(&header, 0)
                     }
                     Some((ep, intf)) => {
-                        trace!("->Endpoint {ep:02x?}");
-                        trace!("->Setup {setup:02x?}");
-                        trace!("->Request {data:02x?}");
-
-                        let resp = device
-                            .handle_urb(
-                                ep,
-                                intf,
-                                transfer_buffer_length,
-                                SetupPacket::parse(&setup),
-                                &data,
-                            )
-                            .await;
-
-                        match resp {
+                        match device.handle_urb(
+                            ep,
+                            intf,
+                            transfer_buffer_length,
+                            SetupPacket::parse(&setup),
+                            &data,
+                        ) {
                             Ok(resp) => {
                                 if out {
                                     trace!("<-Wrote {}", data.len());

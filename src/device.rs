@@ -1,7 +1,7 @@
-use std::{os::unix::ffi::OsStrExt, path::PathBuf};
+use std::{io, os::unix::ffi::OsStrExt, path::PathBuf};
 
 use super::*;
-use nusb::{Device, Interface};
+use nusb::{Device, Interface, MaybeFuture};
 use rusb::Version as rusbVersion;
 
 #[derive(Clone, Default, Debug)]
@@ -277,7 +277,7 @@ impl UsbDevice {
         result
     }
 
-    pub(crate) async fn handle_urb(
+    pub(crate) fn handle_urb(
         &self,
         ep: UsbEndpoint,
         intf: Option<&UsbInterface>,
@@ -289,6 +289,23 @@ impl UsbDevice {
         use Direction::*;
         use EndpointAttributes::*;
         use StandardRequest::*;
+
+        let intf_num = match intf {
+            Some(i) => i.handler.interface_number(),
+            None => 0
+        };
+        let device = match self.device_handler.clone() {
+            Some(dev) => {
+            #[cfg(target_os = "linux")]
+            if let Err(e) = dev.detach_kernel_driver(intf_num) {
+                error!("Failed to detach kernel driver: {e:?}");
+            }
+            dev.claim_interface(intf_num).wait()?;
+            dev
+            }
+            None => return Err(std::io::Error::new(ErrorKind::NotFound, "No device found"))
+        };
+
         match (FromPrimitive::from_u8(ep.attributes), ep.direction()) {
             (Some(Control), In) => {
                 // control in
@@ -473,17 +490,17 @@ impl UsbDevice {
                         // to interface
                         // see https://www.beyondlogic.org/usbnutshell/usb6.shtml
                         // only low 8 bits are valid
-                        let device = match self.device_handler.clone() {
-                            Some(dev) => dev,
-                            None => {
-                                return Ok(Vec::new());
-                            }
-                        };
+                        // let device = match self.device_handler.clone() {
+                        //     Some(dev) => dev,
+                        //     None => {
+                        //         return Ok(Vec::new());
+                        //     }
+                        // };
                         let intf = &self.interfaces[setup_packet.index as usize & 0xFF];
                         let handler = intf.handler.clone();
                         handle_urb_for_interface(
                             handler,
-                            device,
+                            // device,
                             ep,
                             transfer_buffer_length,
                             setup_packet,
@@ -515,26 +532,26 @@ impl UsbDevice {
                         let mut desc = vec![
                             self.configuration_value, // bConfigurationValue
                         ];
-                        if let Some(dh) = self.device_handler.clone() {
-                            #[cfg(target_os = "linux")]
-                            match intf {
-                                Some(i) => {
-                                    if let Err(e) =
-                                        dh.detach_kernel_driver(i.handler.interface_number())
-                                    {
-                                        error!("Failed to detach kernel driver: {e:?}");
-                                    }
-                                }
-                                None => {
-                                    if let Err(e) = dh.detach_kernel_driver(0) {
-                                        error!("Failed to detach kernel driver: {e:?}");
-                                    }
-                                }
-                            }
-                            if let Err(e) = dh.set_configuration(setup_packet.value as u8).await {
-                                error!("Error setting config: {e:?}");
-                            };
-                        }
+                        // if let Some(dh) = self.device_handler.clone() {
+                        //     #[cfg(target_os = "linux")]
+                        //     match intf {
+                        //         Some(i) => {
+                        //             if let Err(e) =
+                        //                 dh.detach_kernel_driver(i.handler.interface_number())
+                        //             {
+                        //                 error!("Failed to detach kernel driver: {e:?}");
+                        //             }
+                        //         }
+                        //         None => {
+                        //             if let Err(e) = dh.detach_kernel_driver(0) {
+                        //                 error!("Failed to detach kernel driver: {e:?}");
+                        //             }
+                        //         }
+                        //     }
+                        //     if let Err(e) = dh.set_configuration(setup_packet.value as u8).wait() {
+                        //         error!("Error setting config: {e:?}");
+                        //     };
+                        // }
                         // requested len too short: wLength < real length
                         if setup_packet.length < desc.len() as u16 {
                             desc.resize(setup_packet.length as usize, 0);
@@ -548,15 +565,15 @@ impl UsbDevice {
 
                         let intf = &self.interfaces[setup_packet.index as usize & 0xFF];
                         let interface = intf.handler.clone();
-                        let device = match self.device_handler.clone() {
-                            Some(dev) => dev,
-                            None => {
-                                return Ok(Vec::new());
-                            }
-                        };
+                        // let device = match self.device_handler.clone() {
+                        //     Some(dev) => dev,
+                        //     None => {
+                        //         return Ok(Vec::new());
+                        //     }
+                        // };
                         handle_urb_for_interface(
                             interface,
-                            device,
+                            // device,
                             ep,
                             transfer_buffer_length,
                             setup_packet,
@@ -599,22 +616,21 @@ impl UsbDevice {
                 // info!("ep: {ep:?}. interface: {intf:?}");
                 let intf = intf.unwrap();
                 let interface = intf.handler.clone();
-                let device = match self.device_handler.clone() {
-                    Some(dev) => dev,
-                    None => {
-                        return Ok(Vec::new());
-                    }
-                };
+                // let device = match self.device_handler.clone() {
+                //     Some(dev) => dev,
+                //     None => {
+                //         return Ok(Vec::new());
+                //     }
+                // };
                 handle_urb_for_interface(
                     interface,
-                    device,
+                    // device,
                     ep,
                     transfer_buffer_length,
                     setup_packet,
                     out_data,
                 )
-            }
-            // _ => unimplemented!("transfer to {:?}", ep),
+            } // _ => unimplemented!("transfer to {:?}", ep),
         }
     }
 }

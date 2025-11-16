@@ -28,8 +28,16 @@ impl SetupPacket {
             length: ((setup[7] as u16) << 8) | (setup[6] as u16),
         }
     }
+
+    pub fn is_setup(&self) -> bool {
+        self.request_type != 0
+            || self.request != 0
+            || self.value != 0
+            || self.index != 0
+            || self.length != 0
+    }
 }
 
-pub fn is_setup(setup: &[u8; 8]) -> bool {
-    setup.iter().any(|b| *b != 0)
-}
+// pub fn is_setup(setup: &[u8; 8]) -> bool {
+//     setup.iter().any(|b| *b != 0)
+// }
