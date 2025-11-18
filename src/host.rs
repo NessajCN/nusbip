@@ -2,7 +2,7 @@
 use log::*;
 use nusb::{
     Device, Interface, MaybeFuture,
-    transfer::{Bulk, Direction, In, Interrupt, Out},
+    transfer::{Buffer, Bulk, Direction, In, Interrupt, Out},
 };
 use rusb::{DeviceHandle, GlobalContext};
 use std::io::Result;
@@ -349,7 +349,6 @@ pub fn handle_urb_for_interface(
     setup: SetupPacket,
     req: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut buffer = vec![0u8; transfer_buffer_length as usize];
     let timeout = Duration::new(1, 0);
     // info!(
     //     "Handling interface with endpoint: {ep:?}, interface: {}, transfer length: {transfer_buffer_length}",
@@ -462,6 +461,7 @@ pub fn handle_urb_for_interface(
                 .reader(4096)
                 .with_num_transfers(1)
                 .with_read_timeout(timeout);
+            let mut buffer = vec![0u8; transfer_buffer_length as usize];
 
             if let Ok(()) = reader.read_exact(&mut buffer) {
                 // info!("interrupt in {:?}", &buffer[..len]);
@@ -545,22 +545,32 @@ pub fn handle_urb_for_interface(
             //     .claim_interface(interface.interface_number())
             //     .await
             //     .unwrap();
-            let ep_in = interface.endpoint::<Bulk, In>(ep.address)?;
-            let mut reader = ep_in
-                .reader(4096)
-                .with_num_transfers(1)
-                .with_read_timeout(timeout);
+            let mut ep_in = interface.endpoint::<Bulk, In>(ep.address)?;
+            let max_packet_size = ep_in.max_packet_size();
 
-            match reader.read_exact(&mut buffer) {
-                Ok(()) => {
-                    // info!("Reading bulk in {:02x?},  ep: {ep:02x?}", &buffer);
-                    return Ok(buffer);
-                }
-                Err(e) => {
-                    error!("Error when read buffer: {e:?}, buffer: {buffer:02x?}.");
-                    return Err(e);
-                }
-            }
+            let requested_len =
+                ((transfer_buffer_length - 1) as usize / max_packet_size + 1) * max_packet_size;
+            let buffer = Buffer::new(requested_len);
+            let c = ep_in.transfer_blocking(buffer, timeout);
+            let buf = c.into_result()?;
+            return Ok(buf.into_vec());
+            // let mut reader = ep_in
+            //     .reader(4096)
+            //     .with_num_transfers(1)
+            //     .with_read_timeout(timeout);
+            // // let mut buffer = vec![0u8; max_packet_size];
+
+            // let mut buffer = vec![0u8; transfer_buffer_length as usize];
+            // match reader.read_exact(&mut buffer) {
+            //     Ok(_) => {
+            //         // info!("Reading bulk in {:02x?},  ep: {ep:02x?}", &buffer);
+            //         return Ok(buffer);
+            //     }
+            //     Err(e) => {
+            //         error!("Error when read buffer: {e:?}, buffer: {buffer:02x?}.");
+            //         return Err(e);
+            //     }
+            // }
             // if let Ok(len) = handle.read_bulk(ep.address, &mut buffer, timeout) {
             //     return Ok(Vec::from(&buffer[..len]));
             // }

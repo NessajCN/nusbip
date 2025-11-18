@@ -1,4 +1,4 @@
-use std::{io, os::unix::ffi::OsStrExt, path::PathBuf};
+use std::{os::unix::ffi::OsStrExt, path::PathBuf};
 
 use super::*;
 use nusb::{Device, Interface, MaybeFuture};
@@ -290,21 +290,21 @@ impl UsbDevice {
         use EndpointAttributes::*;
         use StandardRequest::*;
 
-        let intf_num = match intf {
-            Some(i) => i.handler.interface_number(),
-            None => 0
-        };
-        let device = match self.device_handler.clone() {
-            Some(dev) => {
-            #[cfg(target_os = "linux")]
-            if let Err(e) = dev.detach_kernel_driver(intf_num) {
-                error!("Failed to detach kernel driver: {e:?}");
-            }
-            dev.claim_interface(intf_num).wait()?;
-            dev
-            }
-            None => return Err(std::io::Error::new(ErrorKind::NotFound, "No device found"))
-        };
+        // let intf_num = match intf {
+        //     Some(i) => i.handler.interface_number(),
+        //     None => 0,
+        // };
+        // let device = match self.device_handler.clone() {
+        //     Some(dev) => {
+        //         #[cfg(target_os = "linux")]
+        //         if let Err(e) = dev.detach_kernel_driver(intf_num) {
+        //             error!("Failed to detach kernel driver: {e:?}");
+        //         }
+        //         dev.claim_interface(intf_num).wait()?;
+        //         dev
+        //     }
+        //     None => return Err(std::io::Error::new(ErrorKind::NotFound, "No device found")),
+        // };
 
         match (FromPrimitive::from_u8(ep.attributes), ep.direction()) {
             (Some(Control), In) => {
@@ -532,26 +532,28 @@ impl UsbDevice {
                         let mut desc = vec![
                             self.configuration_value, // bConfigurationValue
                         ];
-                        // if let Some(dh) = self.device_handler.clone() {
-                        //     #[cfg(target_os = "linux")]
-                        //     match intf {
-                        //         Some(i) => {
-                        //             if let Err(e) =
-                        //                 dh.detach_kernel_driver(i.handler.interface_number())
-                        //             {
-                        //                 error!("Failed to detach kernel driver: {e:?}");
-                        //             }
-                        //         }
-                        //         None => {
-                        //             if let Err(e) = dh.detach_kernel_driver(0) {
-                        //                 error!("Failed to detach kernel driver: {e:?}");
-                        //             }
-                        //         }
-                        //     }
-                        //     if let Err(e) = dh.set_configuration(setup_packet.value as u8).wait() {
-                        //         error!("Error setting config: {e:?}");
-                        //     };
-                        // }
+                        if let Some(device) = self.device_handler.clone() {
+                            #[cfg(target_os = "linux")]
+                            match intf {
+                                Some(i) => {
+                                    if let Err(e) =
+                                        device.detach_kernel_driver(i.handler.interface_number())
+                                    {
+                                        error!("Failed to detach kernel driver: {e:?}");
+                                    }
+                                }
+                                None => {
+                                    if let Err(e) = device.detach_kernel_driver(0) {
+                                        error!("Failed to detach kernel driver: {e:?}");
+                                    }
+                                }
+                            }
+                            if let Err(e) =
+                                device.set_configuration(setup_packet.value as u8).wait()
+                            {
+                                error!("Error setting config: {e:?}");
+                            };
+                        }
                         // requested len too short: wLength < real length
                         if setup_packet.length < desc.len() as u16 {
                             desc.resize(setup_packet.length as usize, 0);

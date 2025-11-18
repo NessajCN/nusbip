@@ -60,7 +60,18 @@ impl TransferFlags {
     pub const ZERO_PACKET: u32 = 0x00000040;
     pub const NO_INTERRUPT: u32 = 0x00000080;
     pub const FREE_BUFFER: u32 = 0x00000100;
+    pub const DIR_IN: u32 = 0x00000200;
+    pub const DIR_OUT: u32 = 0x00000000;
     pub const DIR_MASK: u32 = 0x00000200;
+
+    pub const DMA_MAP_SINGLE: u32 = 0x00010000;
+    pub const DMA_MAP_PAGE: u32 = 0x00020000;
+    pub const DMA_MAP_SG: u32 = 0x00040000;
+    pub const MAP_LOCAL: u32 = 0x00080000;
+    pub const SETUP_MAP_SINGLE: u32 = 0x00100000;
+    pub const SETUP_MAP_LOCAL: u32 = 0x00200000;
+    pub const DMA_SG_COMBINED: u32 = 0x00400000;
+    pub const ALIGNED_TEMP_BUFFER: u32 = 0x00800000;
 }
 
 /// USB endpoint direction: IN or OUT
