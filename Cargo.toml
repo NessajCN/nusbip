@@ -4,7 +4,7 @@ version = "0.7.1"
 authors = ["Nessaj"]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/NessajCN/usbip"
+repository = "https://github.com/NessajCN/nusbip"
 description = "A forked library to run USB/IP server based on nusb"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
