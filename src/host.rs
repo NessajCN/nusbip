@@ -571,7 +571,7 @@ impl UsbDeviceHandler for NusbUsbHostDeviceHandler {
         let dev = self.handle.lock().unwrap();
         let sp = SetupPacket::parse(setup);
 
-        let cfg = dev.active_configuration()?;
+        // let cfg = dev.active_configuration()?;
         // info!("Interface cfg: {cfg:?}");
 
         // for intf in cfg.interfaces() {
