@@ -255,6 +255,7 @@ impl UsbIpServer {
         }
     }
 
+    /// Reclaim the detached os driver.
     pub async fn cleanup(&self) {
         let mut used_devices = self.used_devices.write().await;
         let mut available_devices = self.available_devices.write().await;

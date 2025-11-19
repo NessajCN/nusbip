@@ -8,13 +8,13 @@ use tokio::signal;
 async fn main() {
     env_logger::init();
     let server = Arc::new(
-        usbip::UsbIpServer::new_from_host_with_filter(|d| {
+        nusbip::UsbIpServer::new_from_host_with_filter(|d| {
             d.class() != 0x09 && d.vendor_id() == 0x0951
         })
         .await,
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 3240);
-    tokio::spawn(usbip::server(addr, server.clone()));
+    tokio::spawn(nusbip::server(addr, server.clone()));
 
     match signal::ctrl_c().await {
         Ok(()) => {

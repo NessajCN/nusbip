@@ -1,5 +1,5 @@
 [package]
-name = "usbip"
+name = "nusbip"
 version = "0.7.1"
 authors = ["Nessaj"]
 edition = "2024"
