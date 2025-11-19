@@ -4,7 +4,6 @@ use nusb::{
     Device, Interface, MaybeFuture,
     transfer::{Buffer, Bulk, Direction, In, Interrupt, Out},
 };
-use rusb::{DeviceHandle, GlobalContext};
 use std::io::Result;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -14,164 +13,6 @@ use crate::{
     EndpointAttributes, SetupPacket, UsbDeviceHandler, UsbEndpoint, UsbInterface,
     UsbInterfaceHandler,
 };
-
-/// A handler to pass requests to interface of a rusb USB device of the host
-#[derive(Clone, Debug)]
-pub struct RusbUsbHostInterfaceHandler {
-    handle: Arc<Mutex<DeviceHandle<GlobalContext>>>,
-}
-
-impl RusbUsbHostInterfaceHandler {
-    pub fn new(handle: Arc<Mutex<DeviceHandle<GlobalContext>>>) -> Self {
-        Self { handle }
-    }
-}
-
-impl UsbInterfaceHandler for RusbUsbHostInterfaceHandler {
-    fn handle_urb(
-        &mut self,
-        _interface: &UsbInterface,
-        ep: UsbEndpoint,
-        transfer_buffer_length: u32,
-        setup: SetupPacket,
-        req: &[u8],
-    ) -> Result<Vec<u8>> {
-        debug!("To host device: ep={ep:?} setup={setup:?} req={req:?}",);
-        let mut buffer = vec![0u8; transfer_buffer_length as usize];
-        let timeout = std::time::Duration::new(1, 0);
-        let handle = self.handle.lock().unwrap();
-        if ep.attributes == EndpointAttributes::Control as u8 {
-            // control
-            if let Direction::In = ep.direction() {
-                // control in
-                if let Ok(len) = handle.read_control(
-                    setup.request_type,
-                    setup.request,
-                    setup.value,
-                    setup.index,
-                    &mut buffer,
-                    timeout,
-                ) {
-                    return Ok(Vec::from(&buffer[..len]));
-                }
-            } else {
-                // control out
-                handle
-                    .write_control(
-                        setup.request_type,
-                        setup.request,
-                        setup.value,
-                        setup.index,
-                        req,
-                        timeout,
-                    )
-                    .ok();
-            }
-        } else if ep.attributes == EndpointAttributes::Interrupt as u8 {
-            // interrupt
-            if let Direction::In = ep.direction() {
-                // interrupt in
-                if let Ok(len) = handle.read_interrupt(ep.address, &mut buffer, timeout) {
-                    info!("intr in {:?}", &buffer[..len]);
-                    return Ok(Vec::from(&buffer[..len]));
-                }
-            } else {
-                // interrupt out
-                handle.write_interrupt(ep.address, req, timeout).ok();
-            }
-        } else if ep.attributes == EndpointAttributes::Bulk as u8 {
-            // bulk
-            if let Direction::In = ep.direction() {
-                // bulk in
-                if let Ok(len) = handle.read_bulk(ep.address, &mut buffer, timeout) {
-                    return Ok(Vec::from(&buffer[..len]));
-                }
-            } else {
-                // bulk out
-                handle.write_bulk(ep.address, req, timeout).ok();
-            }
-        }
-        Ok(vec![])
-    }
-
-    fn get_class_specific_descriptor(&self) -> Vec<u8> {
-        vec![]
-    }
-
-    fn as_any(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
-/// A handler to pass requests to device of a rusb USB device of the host
-#[derive(Clone, Debug)]
-pub struct RusbUsbHostDeviceHandler {
-    handle: Arc<Mutex<DeviceHandle<GlobalContext>>>,
-}
-
-impl RusbUsbHostDeviceHandler {
-    pub fn new(handle: Arc<Mutex<DeviceHandle<GlobalContext>>>) -> Self {
-        Self { handle }
-    }
-}
-
-impl UsbDeviceHandler for RusbUsbHostDeviceHandler {
-    fn handle_urb(
-        &mut self,
-        transfer_buffer_length: u32,
-        setup: SetupPacket,
-        req: &[u8],
-    ) -> Result<Vec<u8>> {
-        debug!("To host device: setup={setup:?} req={req:?}");
-        let mut buffer = vec![0u8; transfer_buffer_length as usize];
-        let timeout = std::time::Duration::new(1, 0);
-        let handle = self.handle.lock().unwrap();
-        // control
-        if setup.request_type & 0x80 == 0 {
-            // control out
-            handle
-                .write_control(
-                    setup.request_type,
-                    setup.request,
-                    setup.value,
-                    setup.index,
-                    req,
-                    timeout,
-                )
-                .ok();
-        } else {
-            // control in
-            if let Ok(len) = handle.read_control(
-                setup.request_type,
-                setup.request,
-                setup.value,
-                setup.index,
-                &mut buffer,
-                timeout,
-            ) {
-                return Ok(Vec::from(&buffer[..len]));
-            }
-        }
-        Ok(vec![])
-    }
-
-    #[cfg(target_os = "linux")]
-    fn release_claim(&mut self) {}
-
-    #[cfg(not(target_os = "windows"))]
-    fn reset(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn set_configuration(&self, setup: &[u8; 8]) -> Result<()> {
-        Ok(())
-    }
-
-    fn as_any(&mut self) -> &mut dyn Any {
-        self
-    }
-}
 
 /// A handler to pass requests to interface of a nusb USB device of the host
 #[derive(Clone)]
@@ -558,7 +399,6 @@ pub fn handle_urb_for_interface(
             //     .reader(4096)
             //     .with_num_transfers(1)
             //     .with_read_timeout(timeout);
-            // // let mut buffer = vec![0u8; max_packet_size];
 
             // let mut buffer = vec![0u8; transfer_buffer_length as usize];
             // match reader.read_exact(&mut buffer) {

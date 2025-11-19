@@ -238,7 +238,7 @@ impl UsbIpCommand {
                     data,
                     iso_packet_descriptor,
                 };
-                info!("Received: {c:02x?}");
+                // info!("Received: {c:02x?}");
                 Ok(c)
             }
             USBIP_CMD_UNLINK => {
@@ -510,7 +510,7 @@ impl UsbIpResponse {
             transfer_buffer,
             iso_packet_descriptor,
         };
-        info!("Sent success: {s:02x?}");
+        // info!("Sent success: {s:02x?}");
         s
     }
 
@@ -526,7 +526,7 @@ impl UsbIpResponse {
             transfer_buffer: vec![],
             iso_packet_descriptor: vec![],
         };
-        info!("Sent failed: {s:02x?}");
+        // info!("Sent failed: {s:02x?}");
         s
     }
 

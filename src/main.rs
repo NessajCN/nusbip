@@ -21,8 +21,9 @@ async fn main() {
             server.cleanup().await;
         }
         Err(err) => {
-            eprintln!("Unable to listen for shutdown signal: {}", err);
+            error!("Unable to listen for shutdown signal: {}", err);
             // we also shut down in case of error
+            server.cleanup().await;
         }
     }
 }

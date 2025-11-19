@@ -2,7 +2,6 @@ use std::{os::unix::ffi::OsStrExt, path::PathBuf};
 
 use super::*;
 use nusb::{Device, Interface, MaybeFuture};
-use rusb::Version as rusbVersion;
 
 #[derive(Clone, Default, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -10,22 +9,6 @@ pub struct Version {
     pub major: u8,
     pub minor: u8,
     pub patch: u8,
-}
-
-impl From<rusbVersion> for Version {
-    fn from(value: rusbVersion) -> Self {
-        Self {
-            major: value.major(),
-            minor: value.minor(),
-            patch: value.sub_minor(),
-        }
-    }
-}
-
-impl From<Version> for rusbVersion {
-    fn from(val: Version) -> Self {
-        rusbVersion(val.major, val.minor, val.patch)
-    }
 }
 
 /// bcdDevice

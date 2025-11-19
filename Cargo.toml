@@ -1,11 +1,11 @@
 [package]
 name = "usbip"
 version = "0.7.1"
-authors = ["Jiajie Chen <c@jia.je>"]
+authors = ["Nessaj"]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/jiegec/usbip"
-description = "A library to run USB/IP server"
+repository = "https://github.com/NessajCN/usbip"
+description = "A forked library to run USB/IP server based on nusb"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -14,11 +14,9 @@ tokio = { version = "1.22.0", features = ["full"] }
 log = "0.4.17"
 num-traits = "0.2.15"
 num-derive = "0.4.2"
-rusb = "0.9.4"
 serde = { version = "1.0", features = ["derive"], optional = true }
 nusb = {version = "0.2", features=["tokio"]}
 env_logger = "0.11.7"
 
 [features]
 default = []
-serde = ["dep:serde", "rusb/serde"]
