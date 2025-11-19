@@ -35,13 +35,13 @@ pub use interface::*;
 pub use setup::*;
 pub use util::*;
 
-use crate::usbip_protocol::{USBIP_RET_SUBMIT, USBIP_RET_UNLINK, UsbIpResponse};
+use crate::usbip_protocol::{USBIP_RET_SUBMIT, USBIP_RET_UNLINK, UsbIpHeaderBasic, UsbIpResponse};
 
 /// Main struct of a USB/IP server
 #[derive(Default, Debug)]
 pub struct UsbIpServer {
     available_devices: RwLock<Vec<UsbDevice>>,
-    used_devices: RwLock<HashMap<String, UsbDevice>>,
+    used_devices: RwLock<Vec<UsbDevice>>,
 }
 
 impl UsbIpServer {
@@ -49,7 +49,7 @@ impl UsbIpServer {
     pub fn new_simulated(devices: Vec<UsbDevice>) -> Self {
         Self {
             available_devices: RwLock::new(devices),
-            used_devices: RwLock::new(HashMap::new()),
+            used_devices: RwLock::new(Vec::new()),
         }
     }
 
@@ -213,10 +213,7 @@ impl UsbIpServer {
     {
         match nusb::list_devices().await {
             Ok(list) => {
-                let mut devs = vec![];
-                for d in list.filter(filter) {
-                    devs.push(d)
-                }
+                let devs: Vec<DeviceInfo> = list.filter(filter).collect();
                 Self {
                     available_devices: RwLock::new(Self::with_nusb_devices(devs).await),
                     ..Default::default()
@@ -233,19 +230,22 @@ impl UsbIpServer {
     pub async fn remove_device(&self, bus_id: &str) -> Result<()> {
         let mut available_devices = self.available_devices.write().await;
 
-        if let Some(device) = available_devices.iter().position(|d| d.bus_id == bus_id) {
-            available_devices.remove(device);
+        if let Some(i) = available_devices.iter().position(|d| d.bus_id == bus_id) {
+            if let Some(dev) = available_devices[i].device_handler.clone() {
+                release_claim(dev);
+            }
+            available_devices.remove(i);
             Ok(())
-        } else if let Some(device) = self
+        } else if self
             .used_devices
             .read()
             .await
-            .values()
-            .find(|d| d.bus_id == bus_id)
+            .iter()
+            .any(|d| d.bus_id == bus_id)
         {
             Err(std::io::Error::other(format!(
                 "Device {} is in use",
-                device.bus_id
+                bus_id
             )))
         } else {
             Err(std::io::Error::new(
@@ -255,48 +255,205 @@ impl UsbIpServer {
         }
     }
 
+    pub async fn occupy(&self, bus_id: &str) -> Result<UsbDevice> {
+        let mut ad = self.available_devices.write().await;
+        let device = match ad.iter().position(|d| d.bus_id == bus_id) {
+            Some(i) => ad.remove(i),
+            None => return Err(std::io::Error::other(format!("No available device"))),
+        };
+        let mut ud = self.used_devices.write().await;
+        if !ud.iter().any(|d| d.bus_id == device.bus_id) {
+            ud.push(device.clone());
+        }
+        Ok(device)
+    }
+
+    pub async fn release(&self, device: UsbDevice) {
+        let mut ud = self.used_devices.write().await;
+        let mut ad = self.available_devices.write().await;
+        let new_vec = ud.clone();
+        let new_ud: Vec<UsbDevice> = new_vec
+            .into_iter()
+            .filter(|d| d.bus_id != device.bus_id)
+            .collect();
+        if !ad.iter().any(|d| d.bus_id == device.bus_id) {
+            ad.push(device);
+        }
+        *ud = new_ud;
+    }
+
     /// Reclaim the detached os driver.
     pub async fn cleanup(&self) {
-        let mut used_devices = self.used_devices.write().await;
-        let mut available_devices = self.available_devices.write().await;
-        for k in used_devices.clone().keys() {
-            if let Some(dev) = used_devices.remove(k) {
-                available_devices.push(dev);
+        let mut ud = self.used_devices.write().await;
+        let mut ad = self.available_devices.write().await;
+        for d in ud.clone() {
+            if !ad.iter().any(|dev| d.bus_id == dev.bus_id) {
+                ad.push(d);
             }
         }
+        *ud = Vec::new();
         #[cfg(target_os = "linux")]
         {
-            let mut dev_handlers = Vec::new();
-            for d in available_devices.iter() {
+            for d in ad.iter() {
                 if let Some(dh) = d.device_handler.clone() {
-                    dev_handlers.push(dh);
+                    release_claim(dh);
                 }
             }
-            for devhandler in dev_handlers {
-                release_claim(devhandler);
-            }
+            *ad = Vec::new();
         }
+    }
+
+    pub async fn handle_op_req_devlist<T: AsyncReadExt + AsyncWriteExt + Unpin>(
+        &self,
+        socket: &mut T,
+    ) -> Result<()> {
+        trace!("Got OP_REQ_DEVLIST");
+        let devices = self.available_devices.read().await;
+
+        // OP_REP_DEVLIST
+        UsbIpResponse::op_rep_devlist(&devices)
+            .write_to_socket(socket)
+            .await?;
+        trace!("Sent OP_REP_DEVLIST");
+        Ok(())
+    }
+
+    pub async fn handle_op_req_import<T: AsyncReadExt + AsyncWriteExt + Unpin>(
+        &self,
+        socket: &mut T,
+        busid: [u8; 32],
+        imported_device: &mut Option<UsbDevice>,
+    ) -> Result<()> {
+        trace!("Got OP_REQ_IMPORT");
+
+        let trimmed_busid = &busid[..busid.iter().position(|&x| x == 0).unwrap_or(busid.len())];
+        let bus_id = match str::from_utf8(trimmed_busid) {
+            Ok(s) => s,
+            Err(_e) => return Err(std::io::Error::other(format!("Invalid bus id: {busid:?}"))),
+        };
+
+        // let mut used_devices = self.used_devices.write().await;
+        // let mut available_devices = self.available_devices.write().await;
+
+        match imported_device.take() {
+            Some(dev) => self.release(dev).await,
+            None => (),
+        }
+
+        let usbip_resp = match self.occupy(bus_id).await {
+            Ok(dev) => {
+                let res = UsbIpResponse::op_rep_import_success(&dev);
+                // info!("Incoming import: {dev:?}");
+                *imported_device = Some(dev);
+                res
+            }
+            Err(_) => UsbIpResponse::op_rep_import_fail(),
+        };
+
+        usbip_resp.write_to_socket(socket).await?;
+        trace!("Sent OP_REP_IMPORT");
+        Ok(())
+    }
+
+    pub async fn handle_usbip_cmd_submit<T: AsyncReadExt + AsyncWriteExt + Unpin>(
+        &self,
+        socket: &mut T,
+        mut header: UsbIpHeaderBasic,
+        transfer_buffer_length: u32,
+        setup: [u8; 8],
+        data: Vec<u8>,
+        device: &UsbDevice,
+    ) -> Result<()> {
+        let out = header.direction == 0;
+        let real_ep = if out { header.ep } else { header.ep | 0x80 };
+
+        header.command = USBIP_RET_SUBMIT.into();
+
+        // Reply header from server should have devid/direction/ep all 0.
+        header.devid = 0;
+        header.direction = 0;
+        header.ep = 0;
+
+        let usbip_resp = match device.find_ep(real_ep as u8) {
+            None => {
+                warn!("Endpoint {real_ep:02x?} not found");
+                UsbIpResponse::usbip_ret_submit_fail(&header, 0)
+            }
+            Some((ep, intf)) => {
+                match device.handle_urb(
+                    ep,
+                    intf,
+                    transfer_buffer_length,
+                    SetupPacket::parse(&setup),
+                    &data,
+                ) {
+                    Ok(resp) => {
+                        if out {
+                            trace!("<-Wrote {}", data.len());
+                        } else {
+                            trace!("<-Resp {resp:02x?}");
+                        }
+                        let actual_length = match ep.direction() {
+                            Direction::In => resp.len() as u32,
+                            Direction::Out => transfer_buffer_length,
+                        };
+                        UsbIpResponse::usbip_ret_submit_success(
+                            &header,
+                            0,
+                            actual_length,
+                            resp,
+                            vec![],
+                        )
+                    }
+                    Err(err) => {
+                        warn!("Error handling URB: {err}");
+                        let actual_length = match ep.direction() {
+                            Direction::In => 0,
+                            Direction::Out => transfer_buffer_length,
+                        };
+                        UsbIpResponse::usbip_ret_submit_fail(&header, actual_length)
+                    }
+                }
+            }
+        };
+        usbip_resp.write_to_socket(socket).await?;
+        trace!("Sent USBIP_RET_SUBMIT");
+        Ok(())
+    }
+
+    pub async fn handle_usbip_cmd_unlink<T: AsyncReadExt + AsyncWriteExt + Unpin>(
+        &self,
+        socket: &mut T,
+        mut header: UsbIpHeaderBasic,
+        unlink_seqnum: u32,
+    ) -> Result<()> {
+        trace!("Got USBIP_CMD_UNLINK for {unlink_seqnum:10x?}");
+
+        header.command = USBIP_RET_UNLINK.into();
+        // Reply header from server should have devid/direction/ep all 0.
+        header.devid = 0;
+        header.direction = 0;
+        header.ep = 0;
+
+        let res = UsbIpResponse::usbip_ret_unlink_success(&header);
+        res.write_to_socket(socket).await?;
+        trace!("Sent USBIP_RET_UNLINK");
+        Ok(())
     }
 }
 
 pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
-    mut socket: &mut T,
+    socket: &mut T,
     server: Arc<UsbIpServer>,
+    imported_device: &mut Option<UsbDevice>,
 ) -> Result<()> {
-    let mut current_import_device_id: Option<String> = None;
     loop {
-        let command = match UsbIpCommand::read_from_socket(&mut socket).await {
+        let command = match UsbIpCommand::read_from_socket(socket).await {
             Ok(c) => c,
             Err(err) => {
-                if let Some(dev_id) = current_import_device_id {
-                    let mut used_devices = server.used_devices.write().await;
-                    let mut available_devices = server.available_devices.write().await;
-                    match used_devices.remove(&dev_id) {
-                        Some(dev) => available_devices.push(dev),
-                        None => unreachable!(),
-                    }
+                if let Some(dev) = imported_device.take() {
+                    server.release(dev).await;
                 }
-
                 if err.kind() == ErrorKind::UnexpectedEof {
                     info!("Remote closed the connection");
                     return Ok(());
@@ -306,143 +463,62 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
             }
         };
 
-        // info!("UsbIpCommand received: {command:?}");
-
-        let used_devices = server.used_devices.read().await;
-        let mut current_import_device = current_import_device_id
-            .clone()
-            .and_then(|ref id| used_devices.get(id));
-
         match command {
             UsbIpCommand::OpReqDevlist { .. } => {
-                trace!("Got OP_REQ_DEVLIST");
-                let devices = server.available_devices.read().await;
-
-                // OP_REP_DEVLIST
-                UsbIpResponse::op_rep_devlist(&devices)
-                    .write_to_socket(socket)
-                    .await?;
-                trace!("Sent OP_REP_DEVLIST");
+                if let Err(e) = server.handle_op_req_devlist(socket).await {
+                    error!("UsbipCommand OpReqDevlist handling error: {e:?}");
+                }
             }
             UsbIpCommand::OpReqImport { busid, .. } => {
-                trace!("Got OP_REQ_IMPORT");
-
-                current_import_device_id = None;
-                current_import_device = None;
-                std::mem::drop(used_devices);
-
-                let mut used_devices = server.used_devices.write().await;
-                let mut available_devices = server.available_devices.write().await;
-                let busid_compare =
-                    &busid[..busid.iter().position(|&x| x == 0).unwrap_or(busid.len())];
-                for (i, dev) in available_devices.iter().enumerate() {
-                    if busid_compare == dev.bus_id.as_bytes() {
-                        let dev = available_devices.remove(i);
-                        let dev_id = dev.bus_id.clone();
-                        used_devices.insert(dev.bus_id.clone(), dev);
-                        current_import_device_id = dev_id.clone().into();
-                        current_import_device = Some(used_devices.get(&dev_id).unwrap());
-                        break;
+                if let Err(e) = server
+                    .handle_op_req_import(socket, busid, imported_device)
+                    .await
+                {
+                    error!("UsbipCommand OpReqImport handling error: {e:?}");
+                    if let Some(dev) = imported_device.take() {
+                        server.release(dev).await;
                     }
                 }
-
-                let res = if let Some(dev) = current_import_device {
-                    UsbIpResponse::op_rep_import_success(dev)
-                } else {
-                    UsbIpResponse::op_rep_import_fail()
-                };
-                res.write_to_socket(socket).await?;
-                trace!("Sent OP_REP_IMPORT");
+                info!("Imported device: {imported_device:?}");
             }
             UsbIpCommand::UsbIpCmdSubmit {
-                mut header,
+                header,
                 transfer_buffer_length,
                 setup,
                 data,
                 ..
             } => {
-                // let sp = SetupPacket::parse(&setup);
-                // info!(
-                //     "Got USBIP_CMD_SUBMIT: \nheader - {header:?}, \ntransfer_buffer: {data:?}, \nsetup: {sp:?}"
-                // );
-                let device = match current_import_device {
+                let device = match imported_device.as_ref() {
                     Some(d) => d,
                     None => {
                         error!("No device currently imported");
                         continue;
                     }
                 };
-
-                let out = header.direction == 0;
-                let real_ep = if out { header.ep } else { header.ep | 0x80 };
-
-                header.command = USBIP_RET_SUBMIT.into();
-
-                // Reply header from server should have devid/direction/ep all 0.
-                header.devid = 0;
-                header.direction = 0;
-                header.ep = 0;
-
-                let res = match device.find_ep(real_ep as u8) {
-                    None => {
-                        warn!("Endpoint {real_ep:02x?} not found");
-                        UsbIpResponse::usbip_ret_submit_fail(&header, 0)
-                    }
-                    Some((ep, intf)) => {
-                        match device.handle_urb(
-                            ep,
-                            intf,
-                            transfer_buffer_length,
-                            SetupPacket::parse(&setup),
-                            &data,
-                        ) {
-                            Ok(resp) => {
-                                if out {
-                                    trace!("<-Wrote {}", data.len());
-                                } else {
-                                    trace!("<-Resp {resp:02x?}");
-                                }
-                                let actual_length = match ep.direction() {
-                                    Direction::In => resp.len() as u32,
-                                    Direction::Out => transfer_buffer_length,
-                                };
-                                UsbIpResponse::usbip_ret_submit_success(
-                                    &header,
-                                    0,
-                                    actual_length,
-                                    resp,
-                                    vec![],
-                                )
-                            }
-                            Err(err) => {
-                                warn!("Error handling URB: {err}");
-                                let actual_length = match ep.direction() {
-                                    Direction::In => 0,
-                                    Direction::Out => transfer_buffer_length,
-                                };
-                                UsbIpResponse::usbip_ret_submit_fail(&header, actual_length)
-                            }
-                        }
-                    }
-                };
-                res.write_to_socket(socket).await?;
-                trace!("Sent USBIP_RET_SUBMIT");
+                if let Err(e) = server
+                    .handle_usbip_cmd_submit(
+                        socket,
+                        header,
+                        transfer_buffer_length,
+                        setup,
+                        data,
+                        device,
+                    )
+                    .await
+                {
+                    error!("UsbipCmdSubmit handling error: {e:?}");
+                }
             }
             UsbIpCommand::UsbIpCmdUnlink {
-                mut header,
+                header,
                 unlink_seqnum,
             } => {
-                trace!("Got USBIP_CMD_UNLINK for {unlink_seqnum:10x?}");
-
-                header.command = USBIP_RET_UNLINK.into();
-                // Reply header from server should have devid/direction/ep all 0.
-                header.devid = 0;
-                header.direction = 0;
-                header.ep = 0;
-
-                let res = UsbIpResponse::usbip_ret_unlink_success(&header);
-                res.write_to_socket(socket).await?;
-                trace!("Sent USBIP_RET_UNLINK");
+                if let Err(e) = server
+                    .handle_usbip_cmd_unlink(socket, header, unlink_seqnum)
+                    .await
+                {
+                    error!("UsbipCmdUnlink handling error: {e:?}");
+                }
             }
         }
     }
@@ -452,24 +528,18 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
 pub async fn server(addr: SocketAddr, server: Arc<UsbIpServer>) {
     let listener = TcpListener::bind(addr).await.expect("bind to addr");
 
-    let server = async move {
-        loop {
-            match listener.accept().await {
-                Ok((mut socket, _addr)) => {
-                    info!("Got connection from {:?}", socket.peer_addr());
-                    let new_server = server.clone();
-                    tokio::spawn(async move {
-                        let res = handler(&mut socket, new_server).await;
-                        info!("Handler ended with {res:?}");
-                    });
-                }
-                Err(err) => {
-                    warn!("Got error {err:?}");
-                }
+    while let Ok((mut socket, _addr)) = listener.accept().await {
+        info!("Got connection from {:?}", socket.peer_addr());
+        let new_server = server.clone();
+        tokio::spawn(async move {
+            let mut imported_device: Box<Option<UsbDevice>> = Box::new(None);
+            let res = handler(&mut socket, new_server.clone(), &mut imported_device).await;
+            info!("Handler ended with {res:?}");
+            if let Some(dev) = imported_device.take() {
+                new_server.release(dev).await;
             }
-        }
-    };
-    server.await
+        });
+    }
 }
 
 #[cfg(test)]
@@ -523,9 +593,11 @@ mod tests {
         setup_test_logger();
         let server = UsbIpServer::new_simulated(vec![]);
         let req = UsbIpCommand::OpReqDevlist { status: 0 };
-
+        let mut imported_device: Box<Option<UsbDevice>> = Box::new(None);
         let mut mock_socket = MockSocket::new(req.to_bytes());
-        handler(&mut mock_socket, Arc::new(server)).await.ok();
+        handler(&mut mock_socket, Arc::new(server), &mut imported_device)
+            .await
+            .ok();
 
         assert_eq!(
             mock_socket.output,

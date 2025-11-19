@@ -1,4 +1,10 @@
-# 0.7.1
+# Changelog
+
+## 0.7.2
+
+- Optimize handlers implement.
+
+## 0.7.1
 
 Fork usbip and refactor it with nusb. Fix some problems in Linux.
 Windows version is in progress.
