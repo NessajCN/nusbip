@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.3
+
+- handler optimize
+
 ## 0.7.2
 
 - Optimize handlers implement.

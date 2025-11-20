@@ -303,27 +303,21 @@ impl UsbIpServer {
         }
     }
 
-    pub async fn handle_op_req_devlist<T: AsyncReadExt + AsyncWriteExt + Unpin>(
-        &self,
-        socket: &mut T,
-    ) -> Result<()> {
+    pub async fn handle_op_req_devlist(&self) -> Result<UsbIpResponse> {
         trace!("Got OP_REQ_DEVLIST");
         let devices = self.available_devices.read().await;
 
         // OP_REP_DEVLIST
-        UsbIpResponse::op_rep_devlist(&devices)
-            .write_to_socket(socket)
-            .await?;
+        let usbip_resp = UsbIpResponse::op_rep_devlist(&devices);
         trace!("Sent OP_REP_DEVLIST");
-        Ok(())
+        Ok(usbip_resp)
     }
 
-    pub async fn handle_op_req_import<T: AsyncReadExt + AsyncWriteExt + Unpin>(
+    pub async fn handle_op_req_import(
         &self,
-        socket: &mut T,
         busid: [u8; 32],
         imported_device: &mut Option<UsbDevice>,
-    ) -> Result<()> {
+    ) -> Result<UsbIpResponse> {
         trace!("Got OP_REQ_IMPORT");
 
         let trimmed_busid = &busid[..busid.iter().position(|&x| x == 0).unwrap_or(busid.len())];
@@ -331,9 +325,6 @@ impl UsbIpServer {
             Ok(s) => s,
             Err(_e) => return Err(std::io::Error::other(format!("Invalid bus id: {busid:?}"))),
         };
-
-        // let mut used_devices = self.used_devices.write().await;
-        // let mut available_devices = self.available_devices.write().await;
 
         match imported_device.take() {
             Some(dev) => self.release(dev).await,
@@ -343,27 +334,24 @@ impl UsbIpServer {
         let usbip_resp = match self.occupy(bus_id).await {
             Ok(dev) => {
                 let res = UsbIpResponse::op_rep_import_success(&dev);
-                // info!("Incoming import: {dev:?}");
                 *imported_device = Some(dev);
                 res
             }
             Err(_) => UsbIpResponse::op_rep_import_fail(),
         };
 
-        usbip_resp.write_to_socket(socket).await?;
         trace!("Sent OP_REP_IMPORT");
-        Ok(())
+        Ok(usbip_resp)
     }
 
-    pub async fn handle_usbip_cmd_submit<T: AsyncReadExt + AsyncWriteExt + Unpin>(
+    pub fn handle_usbip_cmd_submit(
         &self,
-        socket: &mut T,
         mut header: UsbIpHeaderBasic,
         transfer_buffer_length: u32,
         setup: [u8; 8],
         data: Vec<u8>,
         device: &UsbDevice,
-    ) -> Result<()> {
+    ) -> Result<UsbIpResponse> {
         let out = header.direction == 0;
         let real_ep = if out { header.ep } else { header.ep | 0x80 };
 
@@ -416,17 +404,15 @@ impl UsbIpServer {
                 }
             }
         };
-        usbip_resp.write_to_socket(socket).await?;
         trace!("Sent USBIP_RET_SUBMIT");
-        Ok(())
+        Ok(usbip_resp)
     }
 
-    pub async fn handle_usbip_cmd_unlink<T: AsyncReadExt + AsyncWriteExt + Unpin>(
+    pub fn handle_usbip_cmd_unlink(
         &self,
-        socket: &mut T,
         mut header: UsbIpHeaderBasic,
         unlink_seqnum: u32,
-    ) -> Result<()> {
+    ) -> Result<UsbIpResponse> {
         trace!("Got USBIP_CMD_UNLINK for {unlink_seqnum:10x?}");
 
         header.command = USBIP_RET_UNLINK.into();
@@ -436,9 +422,8 @@ impl UsbIpServer {
         header.ep = 0;
 
         let res = UsbIpResponse::usbip_ret_unlink_success(&header);
-        res.write_to_socket(socket).await?;
         trace!("Sent USBIP_RET_UNLINK");
-        Ok(())
+        Ok(res)
     }
 }
 
@@ -464,19 +449,22 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
         };
 
         match command {
-            UsbIpCommand::OpReqDevlist { .. } => {
-                if let Err(e) = server.handle_op_req_devlist(socket).await {
-                    error!("UsbipCommand OpReqDevlist handling error: {e:?}");
+            UsbIpCommand::OpReqDevlist { .. } => match server.handle_op_req_devlist().await {
+                Ok(r) => {
+                    r.write_to_socket(socket).await?;
                 }
-            }
+                Err(e) => error!("UsbipCommand OpReqDevlist handling error: {e:?}"),
+            },
             UsbIpCommand::OpReqImport { busid, .. } => {
-                if let Err(e) = server
-                    .handle_op_req_import(socket, busid, imported_device)
-                    .await
-                {
-                    error!("UsbipCommand OpReqImport handling error: {e:?}");
-                    if let Some(dev) = imported_device.take() {
-                        server.release(dev).await;
+                match server.handle_op_req_import(busid, imported_device).await {
+                    Ok(r) => {
+                        r.write_to_socket(socket).await?;
+                    }
+                    Err(e) => {
+                        error!("UsbipCommand OpReqImport handling error: {e:?}");
+                        if let Some(dev) = imported_device.take() {
+                            server.release(dev).await;
+                        }
                     }
                 }
                 info!("Imported device: {imported_device:?}");
@@ -495,31 +483,28 @@ pub async fn handler<T: AsyncReadExt + AsyncWriteExt + Unpin>(
                         continue;
                     }
                 };
-                if let Err(e) = server
-                    .handle_usbip_cmd_submit(
-                        socket,
-                        header,
-                        transfer_buffer_length,
-                        setup,
-                        data,
-                        device,
-                    )
-                    .await
-                {
-                    error!("UsbipCmdSubmit handling error: {e:?}");
+                match server.handle_usbip_cmd_submit(
+                    header,
+                    transfer_buffer_length,
+                    setup,
+                    data,
+                    device,
+                ) {
+                    Ok(r) => {
+                        r.write_to_socket(socket).await?;
+                    }
+                    Err(e) => error!("UsbipCmdSubmit handling error: {e:?}"),
                 }
             }
             UsbIpCommand::UsbIpCmdUnlink {
                 header,
                 unlink_seqnum,
-            } => {
-                if let Err(e) = server
-                    .handle_usbip_cmd_unlink(socket, header, unlink_seqnum)
-                    .await
-                {
-                    error!("UsbipCmdUnlink handling error: {e:?}");
+            } => match server.handle_usbip_cmd_unlink(header, unlink_seqnum) {
+                Ok(r) => {
+                    r.write_to_socket(socket).await?;
                 }
-            }
+                Err(e) => error!("UsbipCmdUnlink handling error: {e:?}"),
+            },
         }
     }
 }
@@ -553,19 +538,6 @@ mod tests {
     };
 
     const SINGLE_DEVICE_BUSID: &str = "0-0-0";
-
-    // fn new_server_with_single_device() -> UsbIpServer {
-    //     UsbIpServer::new_simulated(vec![UsbDevice::new(0).with_interface(
-    //         ClassCode::CDC as u8,
-    //         cdc::CDC_ACM_SUBCLASS,
-    //         0x00,
-    //         Some("Test CDC ACM"),
-    //         cdc::UsbCdcAcmHandler::endpoints(),
-    //         Arc::new(Mutex::new(
-    //             Box::new(cdc::UsbCdcAcmHandler::new()) as Box<dyn UsbInterfaceHandler + Send>
-    //         )),
-    //     )])
-    // }
 
     fn op_req_import(busid: &str) -> Vec<u8> {
         let mut busid = busid.to_string().as_bytes().to_vec();
@@ -605,35 +577,6 @@ mod tests {
         );
     }
 
-    // #[tokio::test]
-    // async fn req_sample_devlist() {
-    //     setup_test_logger();
-    //     let server = new_server_with_single_device();
-    //     let req = UsbIpCommand::OpReqDevlist { status: 0 };
-
-    //     let mut mock_socket = MockSocket::new(req.to_bytes());
-    //     handler(&mut mock_socket, Arc::new(server)).await.ok();
-
-    //     // OP_REP_DEVLIST
-    //     // header: 0xC
-    //     // device: 0x138
-    //     // interface: 4 * 0x1
-    //     assert_eq!(mock_socket.output.len(), 0xC + 0x138 + 4);
-    // }
-
-    // #[tokio::test]
-    // async fn req_import() {
-    //     setup_test_logger();
-    //     let server = new_server_with_single_device();
-
-    //     // OP_REQ_IMPORT
-    //     let req = op_req_import(SINGLE_DEVICE_BUSID);
-    //     let mut mock_socket = MockSocket::new(req);
-    //     handler(&mut mock_socket, Arc::new(server)).await.ok();
-    //     // OP_REQ_IMPORT
-    //     assert_eq!(mock_socket.output.len(), 0x140);
-    // }
-
     #[tokio::test]
     async fn add_and_remove_10_devices() {
         setup_test_logger();
@@ -666,146 +609,4 @@ mod tests {
 
         assert_eq!(device_len, 0);
     }
-
-    // #[tokio::test]
-    // async fn send_usb_traffic_while_adding_and_removing_devices() {
-    //     setup_test_logger();
-    //     let server_ = Arc::new(new_server_with_single_device());
-
-    //     let addr = get_free_address().await;
-    //     tokio::spawn(server(addr, server_.clone()));
-
-    //     let cmd_loop_handle = tokio::spawn(async move {
-    //         let mut connection = poll_connect(addr).await;
-    //         let result = attach_device(&mut connection, SINGLE_DEVICE_BUSID).await;
-    //         assert_eq!(result, 0);
-
-    //         let cdc_loopback_bulk_cmd = UsbIpCommand::UsbIpCmdSubmit {
-    //             header: usbip_protocol::UsbIpHeaderBasic {
-    //                 command: USBIP_CMD_SUBMIT.into(),
-    //                 seqnum: 1,
-    //                 devid: 0,
-    //                 direction: 0, // OUT
-    //                 ep: 2,
-    //             },
-    //             transfer_flags: 0,
-    //             transfer_buffer_length: 8,
-    //             start_frame: 0,
-    //             number_of_packets: 0,
-    //             interval: 0,
-    //             setup: [0; 8],
-    //             data: vec![1, 2, 3, 4, 5, 6, 7, 8],
-    //             iso_packet_descriptor: vec![],
-    //         };
-
-    //         loop {
-    //             connection
-    //                 .write_all(cdc_loopback_bulk_cmd.to_bytes().as_slice())
-    //                 .await
-    //                 .unwrap();
-    //             let mut result = vec![0; 4 * 12];
-    //             connection.read_exact(&mut result).await.unwrap();
-    //         }
-    //     });
-
-    //     let add_and_remove_device_handle = tokio::spawn(async move {
-    //         let mut join_set = JoinSet::new();
-    //         let devices = (1..4).map(UsbDevice::new).collect::<Vec<_>>();
-
-    //         loop {
-    //             for device in devices.iter() {
-    //                 let new_server = server_.clone();
-    //                 let new_device = device.clone();
-    //                 join_set.spawn(async move {
-    //                     new_server.add_device(new_device).await;
-    //                 });
-    //             }
-
-    //             for device in devices.iter() {
-    //                 let new_server = server_.clone();
-    //                 let new_device = device.clone();
-    //                 join_set.spawn(async move {
-    //                     new_server.remove_device(&new_device.bus_id).await.unwrap();
-    //                 });
-    //             }
-    //             while join_set.join_next().await.is_some() {}
-    //             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-    //         }
-    //     });
-
-    //     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    //     cmd_loop_handle.abort();
-    //     add_and_remove_device_handle.abort();
-    // }
-
-    // #[tokio::test]
-    // async fn only_single_connection_allowed_to_device() {
-    //     setup_test_logger();
-    //     let server_ = Arc::new(new_server_with_single_device());
-
-    //     let addr = get_free_address().await;
-    //     tokio::spawn(server(addr, server_.clone()));
-
-    //     let mut first_connection = poll_connect(addr).await;
-    //     let mut second_connection = TcpStream::connect(addr).await.unwrap();
-
-    //     let result = attach_device(&mut first_connection, SINGLE_DEVICE_BUSID).await;
-    //     assert_eq!(result, 0);
-
-    //     let result = attach_device(&mut second_connection, SINGLE_DEVICE_BUSID).await;
-    //     assert_eq!(result, 1);
-    // }
-
-    // #[tokio::test]
-    // async fn device_gets_released_on_closed_socket() {
-    //     setup_test_logger();
-    //     let server_ = Arc::new(new_server_with_single_device());
-
-    //     let addr = get_free_address().await;
-    //     tokio::spawn(server(addr, server_.clone()));
-
-    //     let mut connection = poll_connect(addr).await;
-    //     let result = attach_device(&mut connection, SINGLE_DEVICE_BUSID).await;
-    //     assert_eq!(result, 0);
-
-    //     std::mem::drop(connection);
-
-    //     let mut connection = TcpStream::connect(addr).await.unwrap();
-    //     let result = attach_device(&mut connection, SINGLE_DEVICE_BUSID).await;
-    //     assert_eq!(result, 0);
-    // }
-
-    // #[tokio::test]
-    // async fn req_import_get_device_desc() {
-    //     setup_test_logger();
-    //     let server = new_server_with_single_device();
-
-    //     let mut req = op_req_import(SINGLE_DEVICE_BUSID);
-    //     req.extend(
-    //         UsbIpCommand::UsbIpCmdSubmit {
-    //             header: UsbIpHeaderBasic {
-    //                 command: USBIP_CMD_SUBMIT.into(),
-    //                 seqnum: 1,
-    //                 devid: 0,
-    //                 direction: 1, // IN
-    //                 ep: 0,
-    //             },
-    //             transfer_flags: 0,
-    //             transfer_buffer_length: 0,
-    //             start_frame: 0,
-    //             number_of_packets: 0,
-    //             interval: 0,
-    //             // GetDescriptor to Device
-    //             setup: [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x40, 0x00],
-    //             data: vec![],
-    //             iso_packet_descriptor: vec![],
-    //         }
-    //         .to_bytes(),
-    //     );
-
-    //     let mut mock_socket = MockSocket::new(req);
-    //     handler(&mut mock_socket, Arc::new(server)).await.ok();
-    //     // OP_REQ_IMPORT + USBIP_CMD_SUBMIT + Device Descriptor
-    //     assert_eq!(mock_socket.output.len(), 0x140 + 0x30 + 0x12);
-    // }
 }
