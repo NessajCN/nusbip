@@ -1,4 +1,5 @@
 use env_logger;
+use log::*;
 use std::net::*;
 use std::sync::Arc;
 use tokio::signal;
@@ -8,7 +9,10 @@ async fn main() {
     env_logger::init();
     let server = Arc::new(
         nusbip::UsbIpServer::new_from_host_with_filter(|d| {
-            d.class() != 0x09 && d.vendor_id() == 0x0951
+            // Filter all mass storage devices (bInterfaceClass 08h for mass storage)
+            // Caveat: Do NOT export all usb devices
+            // unless you know exactly what you are doing.
+            d.interfaces().any(|i| i.class() == 0x08)
         })
         .await,
     );
@@ -20,8 +24,9 @@ async fn main() {
             server.cleanup().await;
         }
         Err(err) => {
-            eprintln!("Unable to listen for shutdown signal: {}", err);
+            error!("Unable to listen for shutdown signal: {}", err);
             // we also shut down in case of error
+            server.cleanup().await;
         }
     }
 }

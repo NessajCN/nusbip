@@ -112,7 +112,6 @@ impl UsbIpServer {
 
                 let intf = dev.claim_interface(intf_num).await.unwrap();
                 let intf_desc = intf.descriptor().unwrap();
-                info!("Claimed interface: {intf_desc:?}");
 
                 let mut endpoints = vec![];
 
@@ -214,6 +213,7 @@ impl UsbIpServer {
         match nusb::list_devices().await {
             Ok(list) => {
                 let devs: Vec<DeviceInfo> = list.filter(filter).collect();
+                // info!("devices: {devs:?}");
                 Self {
                     available_devices: RwLock::new(Self::with_nusb_devices(devs).await),
                     ..Default::default()
