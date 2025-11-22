@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 use std::{os::unix::ffi::OsStrExt, path::PathBuf};
 
 use super::*;
@@ -26,7 +27,10 @@ impl From<u16> for Version {
 #[derive(Clone, Default, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct UsbDevice {
+    #[cfg(target_os = "linux")]
     pub path: PathBuf,
+    #[cfg(not(target_os = "linux"))]
+    pub path: String,
     pub bus_id: String,
     pub bus_num: u32,
     pub dev_num: u32,
@@ -61,7 +65,10 @@ pub struct UsbDevice {
 impl UsbDevice {
     pub fn new(index: u32) -> Self {
         let mut res = Self {
+            #[cfg(target_os = "linux")]
             path: PathBuf::from(String::from("/sys/bus/0/0/0")),
+            #[cfg(not(target_os = "linux"))]
+            path: String::from("/sys/bus/0/0/0"),
             bus_id: "0-0-0".to_string(),
             dev_num: index,
             speed: UsbSpeed::High as u32,
@@ -218,8 +225,10 @@ impl UsbDevice {
 
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut result = Vec::with_capacity(312);
-
+        #[cfg(target_os = "linux")]
         let mut path = self.path.clone().as_os_str().as_bytes().to_vec();
+        #[cfg(not(target_os = "linux"))]
+        let mut path = self.path.clone().as_bytes().to_vec();
         debug_assert!(path.len() <= 256);
         path.resize(256, 0);
         result.extend_from_slice(path.as_slice());

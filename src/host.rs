@@ -487,6 +487,7 @@ impl UsbDeviceHandler for NusbUsbHostDeviceHandler {
                     index: setup.index,
                     data: req,
                 };
+                #[cfg(not(target_os = "windows"))]
                 handle.control_out(control, timeout).wait()?;
             } else {
                 // control in
@@ -510,7 +511,7 @@ impl UsbDeviceHandler for NusbUsbHostDeviceHandler {
                     index: setup.index,
                     length: setup.length,
                 };
-
+                #[cfg(not(target_os = "windows"))]
                 if let Ok(buf) = handle.control_in(control, timeout).wait() {
                     return Ok(buf);
                 }
@@ -633,6 +634,7 @@ pub fn handle_urb_for_device(
                 index: setup.index,
                 data: req,
             };
+            #[cfg(not(target_os = "windows"))]
             device.control_out(control, timeout).wait()?;
         } else {
             // control in
@@ -645,7 +647,7 @@ pub fn handle_urb_for_device(
                 index: setup.index,
                 length: setup.length,
             };
-
+            #[cfg(not(target_os = "windows"))]
             if let Ok(buf) = device.control_in(control, timeout).wait() {
                 return Ok(buf);
             }

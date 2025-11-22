@@ -231,6 +231,7 @@ impl UsbIpServer {
         let mut available_devices = self.available_devices.write().await;
 
         if let Some(i) = available_devices.iter().position(|d| d.bus_id == bus_id) {
+            #[cfg(target_os = "linux")]
             if let Some(dev) = available_devices[i].device_handler.clone() {
                 release_claim(dev);
             }
