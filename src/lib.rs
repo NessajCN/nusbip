@@ -9,7 +9,6 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Result};
 use std::net::SocketAddr;
-#[cfg(not(target_os = "macos"))]
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
