@@ -1,6 +1,6 @@
 [package]
 name = "nusbip"
-version = "0.7.4"
+version = "0.7.5"
 authors = ["Nessaj"]
 edition = "2024"
 license = "MIT"

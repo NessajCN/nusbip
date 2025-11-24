@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.5
+
+- fix macos compatibility.
+
 ## 0.7.4
 
 - fix windows and macos compatibility.
